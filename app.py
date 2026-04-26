@@ -8,10 +8,10 @@ from fastapi.responses import HTMLResponse
 app = FastAPI()
 
 # -------------------------
-# 1. ULTIMATE STATE
+# 1. CORE STATE
 # -------------------------
 state = {
-    "status": "SYSTEM READY",
+    "status": "AWAITING API KICKOFF",
     "price": 0.00,
     "rsi": 0.0,
     "ema_200": 0.0,
@@ -26,11 +26,7 @@ state = {
         "api_key": "",
         "api_secret": ""
     },
-    "logs": ["Terminal v50.0 Ultimate Online.", "Awaiting API credentials for Bitget..."],
-    "history": [
-        {"id": "#001", "side": "LONG", "price": 2331.66, "pnl": "+1.2%", "time": "08:45:12"},
-        {"id": "#002", "side": "LONG", "price": 2328.40, "pnl": "-0.08%", "time": "09:12:05"}
-    ]
+    "logs": ["SYSTEM INITIALIZED.", "Awaiting Bitget API Keys...", "UI Engine: Institutional Dark Mode Active."],
 }
 
 SYMBOL = "ETH/USDT"
@@ -38,10 +34,10 @@ exchange = ccxt.bitget({'enableRateLimit': True})
 
 def add_log(msg):
     state["logs"].insert(0, f"[{time.strftime('%H:%M:%S')}] {msg}")
-    state["logs"] = state["logs"][:50] # Increased log memory
+    state["logs"] = state["logs"][:40] 
 
 # -------------------------
-# 2. CORE WINNING LOGIC
+# 2. STRATEGY ENGINE
 # -------------------------
 def calculate_indicators(bars):
     df = pd.DataFrame(bars, columns=['ts', 'o', 'h', 'l', 'c', 'v'])
@@ -56,7 +52,7 @@ def calculate_indicators(bars):
 @app.get("/api/backtest")
 def run_backtest():
     days = state["settings"]["backtest_days"]
-    state["status"] = f"🧪 OPTIMIZING ({days}D)"
+    state["status"] = f"OPTIMIZING ({days}D)"
     try:
         limit = days * 24
         bars = exchange.fetch_ohlcv(SYMBOL, timeframe='1h', limit=limit)
@@ -68,8 +64,8 @@ def run_backtest():
                 if (i % 3) != 0: wins += 1 
         wr = (wins / trades * 100) if trades > 0 else 0
         state["win_rate"] = f"{round(wr, 1)}%"
-        state["status"] = "✅ OPTIMIZATION COMPLETE"
-        add_log(f"Backtest success: {state['win_rate']} WR found.")
+        state["status"] = "OPTIMIZATION COMPLETE"
+        add_log(f"Backtest engine finished: {state['win_rate']} WR across {days} days.")
         return {"status": "success"}
     except Exception as e:
         return {"error": str(e)}
@@ -85,11 +81,11 @@ def bot_loop():
                 state["rsi"] = round(last['rsi'], 1)
                 state["ema_200"] = round(last['ema_200'], 2)
                 if state["rsi"] < 35 and state["price"] > state["ema_200"]:
-                    state["signal"] = "🚀 STRONG BUY"
+                    state["signal"] = "STRONG BUY"
                 elif state["rsi"] > 70:
-                    state["signal"] = "💰 TAKE PROFIT"
+                    state["signal"] = "TAKE PROFIT"
                 else:
-                    state["signal"] = "⚖️ NEUTRAL"
+                    state["signal"] = "NEUTRAL"
             except: pass
         time.sleep(5)
 
@@ -105,107 +101,156 @@ async def update_settings(request: Request):
         "api_key": data.get("api_key", ""),
         "api_secret": data.get("api_secret", "")
     })
-    add_log("Configuration saved.")
+    add_log("Configuration parameters updated.")
     return {"status": "saved"}
 
 # -------------------------
-# 3. THE "VERSION 50" ULTIMATE UI
+# 3. INSTITUTIONAL UI ENGINE
 # -------------------------
 @app.get("/", response_class=HTMLResponse)
 def home():
     return f"""
-    <html>
+    <!DOCTYPE html>
+    <html lang="en">
     <head>
-        <title>Alpha Pro v50.0 | Ultimate</title>
-        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=JetBrains+Mono&display=swap" rel="stylesheet">
+        <meta charset="UTF-8">
+        <title>Alpha Terminal | ETH/USDT</title>
+        <link href="https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;600;700&family=Inter:wght@400;500;700&display=swap" rel="stylesheet">
         <style>
-            :root {{ 
-                --bg: #f8fafc; --sidebar: #ffffff; --card: #ffffff; 
-                --text: #0f172a; --accent: #2563eb; --success: #10b981; 
-                --danger: #ef4444; --border: #e2e8f0;
+            :root {{
+                --bg-main: #0b0e11; --bg-panel: #181a20; --bg-input: #2b3139;
+                --text-main: #eaecef; --text-muted: #848e9c;
+                --up-color: #0ecb81; --down-color: #f6465d; --accent: #fcd535;
+                --border-color: #2b3139;
             }}
-            body {{ background: var(--bg); color: var(--text); font-family: 'Inter', sans-serif; margin: 0; display: flex; height: 100vh; overflow: hidden; }}
+            * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+            body {{ background-color: var(--bg-main); color: var(--text-main); font-family: 'Inter', sans-serif; display: flex; height: 100vh; overflow: hidden; font-size: 13px; }}
             
-            /* FIXED SIDEBAR */
-            .sidebar {{ width: 340px; background: var(--sidebar); border-right: 1px solid var(--border); padding: 25px; display: flex; flex-direction: column; height: 100vh; overflow-y: auto; box-shadow: 4px 0 15px rgba(0,0,0,0.03); }}
+            /* Sidebar Settings */
+            .sidebar {{ width: 320px; background-color: var(--bg-panel); border-right: 1px solid var(--border-color); display: flex; flex-direction: column; overflow-y: auto; }}
+            .sidebar-header {{ padding: 20px; border-bottom: 1px solid var(--border-color); }}
+            .sidebar-header h1 {{ font-size: 16px; font-weight: 700; color: var(--text-main); letter-spacing: 1px; display: flex; align-items: center; justify-content: space-between; }}
+            .pulse-dot {{ height: 8px; width: 8px; background-color: var(--text-muted); border-radius: 50%; display: inline-block; box-shadow: 0 0 8px rgba(255,255,255,0.2); }}
+            .pulse-dot.live {{ background-color: var(--up-color); box-shadow: 0 0 10px var(--up-color); animation: pulse 1.5s infinite; }}
+            @keyframes pulse {{ 0% {{ opacity: 1; }} 50% {{ opacity: 0.4; }} 100% {{ opacity: 1; }} }}
             
-            /* SCROLLABLE MAIN CONTENT */
-            .main {{ flex: 1; padding: 40px; height: 100vh; overflow-y: auto; scroll-behavior: smooth; }}
+            .control-group {{ padding: 15px 20px; border-bottom: 1px solid var(--border-color); }}
+            .control-title {{ font-size: 11px; color: var(--text-muted); text-transform: uppercase; font-weight: 600; margin-bottom: 10px; letter-spacing: 0.5px; }}
             
-            .section-label {{ font-size: 11px; font-weight: 800; color: #94a3b8; text-transform: uppercase; letter-spacing: 1px; margin: 20px 0 10px 0; }}
-            input {{ width: 100%; padding: 12px; border-radius: 8px; border: 1px solid var(--border); font-size: 13px; font-weight: 600; margin-bottom: 10px; background: #fdfdfd; }}
+            input {{ width: 100%; background: var(--bg-input); border: 1px solid transparent; color: var(--text-main); padding: 10px 12px; border-radius: 4px; font-family: 'Roboto Mono', monospace; font-size: 12px; margin-bottom: 8px; transition: 0.2s; }}
+            input:focus {{ border-color: var(--accent); outline: none; }}
             
-            .grid {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin-bottom: 25px; }}
-            .card {{ background: var(--card); padding: 20px; border-radius: 14px; border: 1px solid var(--border); box-shadow: 0 1px 3px rgba(0,0,0,0.05); }}
-            .card-title {{ font-size: 11px; font-weight: 700; color: #64748b; text-transform: uppercase; }}
-            .val {{ font-size: 28px; font-weight: 800; margin-top: 5px; }}
+            /* Buttons */
+            .btn-grid {{ display: grid; grid-template-columns: 1fr; gap: 8px; padding: 20px; }}
+            button {{ padding: 12px; font-weight: 700; font-size: 12px; text-transform: uppercase; border-radius: 4px; border: none; cursor: pointer; transition: 0.2s; letter-spacing: 0.5px; }}
+            .btn-start {{ background: var(--up-color); color: #000; }}
+            .btn-start:hover {{ background: #0b9f63; }}
+            .btn-stop {{ background: var(--bg-input); color: var(--down-color); border: 1px solid var(--down-color); }}
+            .btn-stop:hover {{ background: rgba(246, 70, 93, 0.1); }}
+            .btn-opt {{ background: transparent; color: var(--accent); border: 1px solid var(--accent); }}
+            .btn-opt:hover {{ background: rgba(252, 213, 53, 0.1); }}
 
-            .radar {{ background: white; padding: 50px; border-radius: 20px; border: 1px solid var(--border); text-align: center; margin-bottom: 30px; box-shadow: 0 10px 25px rgba(0,0,0,0.02); }}
-            .sig-val {{ font-size: 64px; font-weight: 900; letter-spacing: -2px; margin: 10px 0; }}
-
-            .btn {{ padding: 15px; border-radius: 10px; border: none; font-weight: 700; cursor: pointer; transition: 0.2s; font-size: 14px; width: 100%; margin-bottom: 10px; }}
-            .btn-start {{ background: var(--success); color: white; }}
-            .btn-bt {{ background: white; border: 2px solid var(--accent); color: var(--accent); }}
-            .btn-stop {{ background: #f1f5f9; color: #64748b; }}
-
-            table {{ width: 100%; border-collapse: collapse; background: white; border-radius: 12px; overflow: hidden; border: 1px solid var(--border); }}
-            th {{ background: #f8fafc; padding: 15px; text-align: left; font-size: 11px; color: #64748b; text-transform: uppercase; }}
-            td {{ padding: 15px; border-top: 1px solid var(--border); font-size: 13px; font-weight: 600; }}
-
-            .log-box {{ background: #0f172a; padding: 15px; border-radius: 10px; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #94a3b8; overflow-y: auto; max-height: 200px; }}
+            /* Main Terminal */
+            .main-content {{ flex: 1; display: flex; flex-direction: column; padding: 20px; overflow-y: auto; }}
+            
+            /* Top Metrics */
+            .metrics-bar {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin-bottom: 20px; }}
+            .metric-card {{ background: var(--bg-panel); border: 1px solid var(--border-color); padding: 15px; border-radius: 4px; }}
+            .m-title {{ color: var(--text-muted); font-size: 11px; text-transform: uppercase; margin-bottom: 5px; }}
+            .m-val {{ font-family: 'Roboto Mono', monospace; font-size: 20px; font-weight: 700; }}
+            .up {{ color: var(--up-color); }} .down {{ color: var(--down-color); }}
+            
+            /* Radar / Execution */
+            .execution-panel {{ background: var(--bg-panel); border: 1px solid var(--border-color); padding: 30px; border-radius: 4px; text-align: center; margin-bottom: 20px; }}
+            .sig-text {{ font-family: 'Roboto Mono', monospace; font-size: 42px; font-weight: 700; margin: 10px 0; }}
+            
+            /* Terminal Console */
+            .terminal-container {{ display: flex; gap: 20px; flex: 1; min-height: 250px; }}
+            .box {{ background: var(--bg-panel); border: 1px solid var(--border-color); border-radius: 4px; display: flex; flex-direction: column; flex: 1; overflow: hidden; }}
+            .box-header {{ padding: 10px 15px; border-bottom: 1px solid var(--border-color); font-size: 11px; color: var(--text-muted); text-transform: uppercase; font-weight: 600; background: rgba(0,0,0,0.2); }}
+            
+            .console-logs {{ padding: 10px; font-family: 'Roboto Mono', monospace; font-size: 11px; color: var(--text-muted); overflow-y: auto; flex: 1; line-height: 1.5; }}
+            .log-line {{ border-bottom: 1px solid rgba(255,255,255,0.03); padding: 4px 0; }}
+            
+            table {{ width: 100%; border-collapse: collapse; }}
+            th, td {{ padding: 10px 15px; text-align: left; border-bottom: 1px solid var(--border-color); }}
+            th {{ font-size: 10px; color: var(--text-muted); text-transform: uppercase; font-weight: 500; }}
+            td {{ font-family: 'Roboto Mono', monospace; font-size: 12px; }}
         </style>
     </head>
     <body>
+
         <div class="sidebar">
-            <h2 style="color: var(--accent); margin: 0;">Alpha Pro <span style="font-weight:400">v50.0</span></h2>
-            <div id="status_tag" style="font-size: 10px; font-weight: 800; color: #94a3b8; margin-bottom: 20px;">SYSTEM: {state['status']}</div>
+            <div class="sidebar-header">
+                <h1>ALPHA ENGINE <span id="status_dot" class="pulse-dot"></span></h1>
+                <div id="status_text" style="color:var(--text-muted); font-size:10px; margin-top:5px; font-family:'Roboto Mono';">{state['status']}</div>
+            </div>
             
-            <div class="section-label">Bitget API Connection</div>
-            <input type="text" id="api_key" placeholder="API Key" value="{state['settings']['api_key']}" onchange="saveSettings()">
-            <input type="password" id="api_secret" placeholder="API Secret" value="{state['settings']['api_secret']}" onchange="saveSettings()">
+            <div class="control-group">
+                <div class="control-title">Exchange API (Bitget)</div>
+                <input type="password" id="api_key" placeholder="API Key" value="{state['settings']['api_key']}" onchange="saveSettings()">
+                <input type="password" id="api_secret" placeholder="API Secret" value="{state['settings']['api_secret']}" onchange="saveSettings()">
+            </div>
 
-            <div class="section-label">Risk Management</div>
-            <label style="font-size:11px; font-weight:700">Max Loss (%)</label>
-            <input type="number" step="0.1" id="inp_loss" value="{state['settings']['max_loss_percent']}" onchange="saveSettings()">
-            
-            <label style="font-size:11px; font-weight:700">Session (Hours)</label>
-            <input type="number" id="inp_session" value="{state['settings']['session_hours']}" onchange="saveSettings()">
+            <div class="control-group">
+                <div class="control-title">Risk Parameters</div>
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:5px;">
+                    <span style="color:var(--text-muted); font-size:11px;">Max Loss Limit (%)</span>
+                    <input type="number" step="0.1" id="inp_loss" value="{state['settings']['max_loss_percent']}" onchange="saveSettings()" style="width:70px; margin:0; padding:6px; text-align:right;">
+                </div>
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <span style="color:var(--text-muted); font-size:11px;">Trade Session (Hrs)</span>
+                    <input type="number" id="inp_session" value="{state['settings']['session_hours']}" onchange="saveSettings()" style="width:70px; margin:0; padding:6px; text-align:right;">
+                </div>
+            </div>
 
-            <div class="section-label">Backtest Config</div>
-            <input type="number" id="inp_bt" value="{state['settings']['backtest_days']}" onchange="saveSettings()">
+            <div class="control-group">
+                <div class="control-title">Engine Optimization</div>
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <span style="color:var(--text-muted); font-size:11px;">Lookback Period (Days)</span>
+                    <input type="number" id="inp_bt" value="{state['settings']['backtest_days']}" onchange="saveSettings()" style="width:70px; margin:0; padding:6px; text-align:right;">
+                </div>
+            </div>
 
-            <button class="btn btn-start" onclick="fetch('/resume', {{method:'POST'}})">▶ LAUNCH TRADING</button>
-            <button class="btn btn-bt" onclick="runBacktest()">🧪 RUN OPTIMIZER</button>
-            <button class="btn btn-stop" onclick="fetch('/pause', {{method:'POST'}})">🛑 EMERGENCY STOP</button>
-
-            <div class="section-label">System Logs</div>
-            <div class="log-box" id="logs">Loading...</div>
+            <div class="btn-grid">
+                <button class="btn-start" onclick="action('/resume')">▶ INITIALIZE LIVE TRADING</button>
+                <button class="btn-opt" onclick="runBacktest()">⚙️ RUN DATA OPTIMIZATION</button>
+                <button class="btn-stop" onclick="action('/pause')">🛑 HALT ENGINE</button>
+            </div>
         </div>
 
-        <div class="main">
-            <div class="grid">
-                <div class="card"><div class="card-title">Win Rate</div><div id="win" class="val" style="color:var(--success)">{state['win_rate']}</div></div>
-                <div class="card"><div class="card-title">Total P&L</div><div id="pnl" class="val" style="color:var(--accent)">{state['total_pnl']}</div></div>
-                <div class="card"><div class="card-title">ETH/USDT</div><div id="price" class="val">$0.00</div></div>
-                <div class="card"><div class="card-title">RSI Level</div><div id="rsi" class="val">0.0</div></div>
+        <div class="main-content">
+            <div class="metrics-bar">
+                <div class="metric-card"><div class="m-title">Win Rate (Last Test)</div><div id="win" class="m-val up">{state['win_rate']}</div></div>
+                <div class="metric-card"><div class="m-title">Total PnL</div><div id="pnl" class="m-val">{state['total_pnl']}</div></div>
+                <div class="metric-card"><div class="m-title">Live Price (ETH/USDT)</div><div id="price" class="m-val">$0.00</div></div>
+                <div class="metric-card"><div class="m-title">RSI (14) Momentum</div><div id="rsi" class="m-val">0.0</div></div>
             </div>
 
-            <div class="radar">
-                <div class="card-title">Current Market Signal</div>
-                <div id="signal" class="sig-val">STANDBY</div>
-                <div id="ema_info" style="color:#64748b; font-weight:600;">Trend Filter (EMA 200): $0.00</div>
+            <div class="execution-panel">
+                <div class="m-title">Algorithmic Execution Signal</div>
+                <div id="signal" class="sig-val sig-text" style="color:var(--text-muted);">STANDBY</div>
+                <div id="ema_info" style="color:var(--text-muted); font-family:'Roboto Mono'; font-size:12px;">Base Trend (EMA 200): $0.00</div>
             </div>
 
-            <h3 style="font-size:14px; text-transform:uppercase; color:#64748b; margin-bottom:15px;">Live Execution History</h3>
-            <table>
-                <thead>
-                    <tr><th>ID</th><th>Side</th><th>Price</th><th>Result</th><th>Time</th></tr>
-                </thead>
-                <tbody id="trade_history">
-                    <tr><td colspan="5" style="text-align:center; color:#94a3b8;">Awaiting first trade...</td></tr>
-                </tbody>
-            </table>
-            <div style="height: 50px;"></div> </div>
+            <div class="terminal-container">
+                <div class="box" style="flex: 2;">
+                    <div class="box-header">Live Order Book / Executions</div>
+                    <div style="overflow-y:auto; flex:1;">
+                        <table>
+                            <thead><tr><th>ID</th><th>Action</th><th>Fill Price</th><th>Unrealized PnL</th><th>Timestamp</th></tr></thead>
+                            <tbody id="trade_history">
+                                <tr><td colspan="5" style="text-align:center; color:var(--text-muted);">Awaiting market data...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="box" style="flex: 1;">
+                    <div class="box-header">System Terminal</div>
+                    <div class="console-logs" id="logs">Loading logic framework...</div>
+                </div>
+            </div>
+        </div>
 
         <script>
             async function saveSettings() {{
@@ -219,8 +264,10 @@ def home():
                 await fetch('/api/settings', {{ method: 'POST', body: JSON.stringify(body), headers: {{ 'Content-Type': 'application/json' }} }});
             }}
 
+            async function action(endpoint) {{ await fetch(endpoint, {{method:'POST'}}); }}
+            
             async function runBacktest() {{
-                document.getElementById('status_tag').innerText = "SYSTEM: RUNNING OPTIMIZER...";
+                document.getElementById('status_text').innerText = "CALCULATING...";
                 await fetch('/api/backtest');
                 location.reload();
             }}
@@ -229,23 +276,32 @@ def home():
                 try {{
                     const res = await fetch('/api/status');
                     const d = await res.json();
+                    
                     document.getElementById('win').innerText = d.win_rate;
                     document.getElementById('pnl').innerText = d.total_pnl;
-                    document.getElementById('price').innerText = "$" + d.price;
+                    document.getElementById('price').innerText = d.price === 0 ? "WAITING..." : "$" + d.price;
                     document.getElementById('rsi').innerText = d.rsi;
-                    document.getElementById('signal').innerText = d.signal;
-                    document.getElementById('ema_info').innerText = "Trend Filter (EMA 200): $" + d.ema_200;
-                    document.getElementById('status_tag').innerText = "SYSTEM: " + d.status;
+                    document.getElementById('ema_info').innerText = "Base Trend (EMA 200): $" + d.ema_200;
+                    document.getElementById('status_text').innerText = d.status;
                     
-                    document.getElementById('logs').innerHTML = d.logs.map(l => "<div>" + l + "</div>").join("");
-                    
+                    // Signal coloring
                     const s = document.getElementById('signal');
-                    if(d.signal.includes("BUY")) s.style.color = "#10b981";
-                    else if(d.signal.includes("PROFIT")) s.style.color = "#2563eb";
-                    else s.style.color = "#94a3b8";
+                    s.innerText = d.signal;
+                    if(d.signal.includes("BUY")) s.style.color = "var(--up-color)";
+                    else if(d.signal.includes("PROFIT")) s.style.color = "var(--down-color)";
+                    else s.style.color = "var(--text-muted)";
+
+                    // Live pulsing dot
+                    const dot = document.getElementById('status_dot');
+                    if(d.status.includes("LIVE")) dot.classList.add("live");
+                    else dot.classList.remove("live");
+
+                    // Logs formatting
+                    document.getElementById('logs').innerHTML = d.logs.map(l => "<div class='log-line'>" + l + "</div>").join("");
+                    
                 }} catch (e) {{ }}
             }}
-            setInterval(update, 2000);
+            setInterval(update, 2500);
         </script>
     </body>
     </html>
@@ -257,10 +313,11 @@ def get_status(): return state
 @app.post("/pause")
 def pause(): 
     state["is_paused"] = True
-    add_log("Trading Paused.")
+    state["status"] = "ENGINE HALTED"
+    add_log("Trading paused by user.")
 
 @app.post("/resume")
 def resume(): 
     state["is_paused"] = False
-    state["status"] = "LIVE MONITORING 🟢"
-    add_log("Bot Active on ETH/USDT.")
+    state["status"] = "LIVE MARKET CONNECTION"
+    add_log("Live Engine engaged. Tracking ETH/USDT.")
