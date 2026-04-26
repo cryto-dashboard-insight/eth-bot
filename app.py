@@ -18,18 +18,14 @@ state = {
     "ema_200": 0.0,
     "signal": "STANDBY",
     "win_rate": "63.6%", 
-    "total_pnl": "0.00%",
     "is_paused": True,
     "active_position": None,
     "trade_history": [],
     "settings": {
-        "session_hours": 3,
-        "max_loss_percent": 5.0,
-        "backtest_days": 10,
         "api_key": os.getenv("BITGET_API_KEY", ""),
         "api_secret": os.getenv("BITGET_API_SECRET", "")
     },
-    "logs": ["SYSTEM v60.2 READY.", "Trade Amount: $10.00 set for $11 balance.", "Awaiting Live Initialization..."],
+    "logs": ["v61.0 LIVE ENGINE READY.", "Ready to trade $10 from $11 balance."],
 }
 
 SYMBOL = "ETH/USDT"
@@ -37,12 +33,12 @@ exchange = None
 
 def add_log(msg):
     state["logs"].insert(0, f"[{time.strftime('%H:%M:%S')}] {msg}")
-    state["logs"] = state["logs"][:40] 
+    state["logs"] = state["logs"][:30] 
 
 # ---------------------------------------------------------
-# 2. EXECUTION ENGINE (Updated for $10 Trade Amount)
+# 2. LIVE EXECUTION ENGINE (Real Orders Enabled)
 # ---------------------------------------------------------
-def execute_trade(side, amount_usd=10): # Changed to $10 to fit your $11 balance
+def execute_trade(side, amount_usd=10):
     global exchange
     if not exchange:
         add_log("CRITICAL: Exchange not initialized.")
@@ -52,34 +48,36 @@ def execute_trade(side, amount_usd=10): # Changed to $10 to fit your $11 balance
         price = state["price"]
         amount_crypto = amount_usd / price
         
-        # Real Bitget Market Order
-        # order = exchange.create_market_order(SYMBOL, side, amount_crypto)
-        
-        trade_id = f"#{len(state['trade_history']) + 1:03d}"
+        # --- REAL ORDER COMMANDS START HERE ---
         if side == 'buy':
+            order = exchange.create_market_buy_order(SYMBOL, amount_crypto)
+            trade_id = f"#{len(state['trade_history']) + 1:03d}"
             state["active_position"] = {
                 "id": trade_id,
                 "entry": price,
                 "amount": amount_crypto,
                 "time": time.strftime('%H:%M:%S'),
-                "current_pnl": "0.000%" # Added extra digit for precision
+                "current_pnl": "0.000%"
             }
-            add_log(f"ORDER FILLED: Long at ${price}")
-        else:
+            add_log(f"LIVE BUY FILLED: {SYMBOL} at ${price}")
+        
+        elif side == 'sell':
+            order = exchange.create_market_sell_order(SYMBOL, state["active_position"]["amount"])
             entry = state['active_position']['entry']
             pnl_val = ((price - entry) / entry) * 100
             state["trade_history"].insert(0, {
                 "id": state["active_position"]["id"],
-                "action": "SELL/CLOSE",
+                "action": "CLOSE/TAKE PROFIT",
                 "price": price,
-                "pnl": f"{round(pnl_val, 3)}%", # More precision to avoid 0.0%
+                "pnl": f"{round(pnl_val, 3)}%",
                 "time": time.strftime('%H:%M:%S')
             })
             state["active_position"] = None
-            add_log(f"EXIT FILLED: Closed at ${price} | PnL: {round(pnl_val, 3)}%")
+            add_log(f"LIVE EXIT FILLED: Closed at ${price} | PnL: {round(pnl_val, 3)}%")
+        # --- REAL ORDER COMMANDS END HERE ---
 
     except Exception as e:
-        add_log(f"EXECUTION ERROR: {str(e)}")
+        add_log(f"API ERROR: {str(e)}")
 
 # ---------------------------------------------------------
 # 3. ANALYTICS & BOT LOOP
@@ -113,15 +111,15 @@ def bot_loop():
                 state["active_position"]["current_pnl"] = f"{round(curr_pnl, 3)}%"
 
             if not state["is_paused"]:
-                # Strategy logic: RSI < 35 (Buy) | RSI > 70 (Sell)
+                # Logic: Buy when oversold (<35) and trend is up (>EMA200)
                 if state["rsi"] < 35 and state["price"] > state["ema_200"]:
-                    state["signal"] = "STRONG BUY"
-                    if not state["active_position"]:
-                        execute_trade('buy')
+                    state["signal"] = "BUY SIGNAL"
+                    if not state["active_position"]: execute_trade('buy')
+                
+                # Logic: Exit when overbought (>70)
                 elif state["rsi"] > 70:
-                    state["signal"] = "TAKE PROFIT"
-                    if state["active_position"]:
-                        execute_trade('sell')
+                    state["signal"] = "EXIT SIGNAL"
+                    if state["active_position"]: execute_trade('sell')
                 else:
                     state["signal"] = "NEUTRAL"
             else:
@@ -139,35 +137,24 @@ threading.Thread(target=bot_loop, daemon=True).start()
 @app.get("/api/status")
 def get_status(): return state
 
-@app.post("/api/settings")
-async def update_settings(request: Request):
-    data = await request.json()
-    state["settings"].update(data)
-    add_log("Settings updated.")
-    return {"status": "saved"}
-
 @app.post("/pause")
 def pause(): 
     state["is_paused"] = True
-    state["status"] = "ENGINE HALTED"
-    add_log("Trading paused by user.")
+    state["status"] = "ENGINE STOPPED"
+    add_log("Trading halted.")
 
 @app.post("/resume")
 def resume(): 
     global exchange
-    if not state["settings"]["api_key"]:
-        add_log("ERROR: Initialization failed. No API Key.")
-        return {"error": "Missing Keys"}
-    
     exchange = ccxt.bitget({
-        'apiKey': state["settings"]["api_key"],
-        'secret': state["settings"]["api_secret"],
-        'enableRateLimit': True
+        'apiKey': os.getenv("BITGET_API_KEY", ""),
+        'secret': os.getenv("BITGET_API_SECRET", ""),
+        'enableRateLimit': True,
+        'options': {'defaultType': 'future'} 
     })
-    
     state["is_paused"] = False
-    state["status"] = "LIVE MONITORING"
-    add_log("Engine engaged. Running $10 ETH Strategy.")
+    state["status"] = "LIVE TRADING ACTIVE"
+    add_log("REAL MONEY MODE ENGAGED.")
 
 @app.get("/", response_class=HTMLResponse)
 def home():
@@ -176,125 +163,57 @@ def home():
     <html>
     <head>
         <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <title>Alpha Terminal | v60.2</title>
-        <link href="https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;600&family=Inter:wght@400;700&display=swap" rel="stylesheet">
+        <title>Alpha Live | v61.0</title>
         <style>
-            :root {{
-                --bg-main: #0b0e11; --bg-panel: #181a20; --bg-input: #2b3139;
-                --text-main: #eaecef; --text-muted: #848e9c;
-                --up-color: #0ecb81; --down-color: #f6465d; --accent: #fcd535;
-                --border-color: #2b3139;
-            }}
-            * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-            body {{ background: var(--bg-main); color: var(--text-main); font-family: 'Inter', sans-serif; display: flex; font-size: 13px; }}
-            
-            .sidebar {{ position: fixed; top: 0; left: 0; width: 300px; height: 100vh; background: var(--bg-panel); border-right: 1px solid var(--border-color); overflow-y: auto; }}
-            .main {{ margin-left: 300px; flex: 1; padding: 20px; }}
-            
-            .group {{ padding: 15px; border-bottom: 1px solid var(--border-color); }}
-            .label {{ font-size: 10px; color: var(--text-muted); text-transform: uppercase; margin-bottom: 8px; font-weight: 700; }}
-            
-            input {{ width: 100%; background: var(--bg-input); border: 1px solid transparent; color: white; padding: 8px; border-radius: 4px; font-family: 'Roboto Mono'; margin-bottom: 8px; font-size: 11px; }}
-            
-            button {{ width: 100%; padding: 12px; border-radius: 4px; border: none; font-weight: 700; cursor: pointer; text-transform: uppercase; margin-bottom: 5px; font-size: 11px; }}
-            .btn-start {{ background: var(--up-color); color: #000; }}
-            .btn-stop {{ background: var(--bg-input); color: var(--down-color); border: 1px solid var(--down-color); }}
-
-            .grid {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 15px; }}
-            .card {{ background: var(--bg-panel); border: 1px solid var(--border-color); padding: 12px; border-radius: 4px; }}
-            .val {{ font-family: 'Roboto Mono'; font-size: 18px; font-weight: 700; margin-top: 5px; }}
-            
-            .radar {{ background: var(--bg-panel); padding: 30px; border: 1px solid var(--border-color); text-align: center; margin-bottom: 15px; }}
-            .sig-text {{ font-family: 'Roboto Mono'; font-size: 40px; font-weight: 700; margin: 5px 0; }}
-            
-            .terminal {{ background: #000; padding: 10px; height: 200px; overflow-y: auto; font-family: 'Roboto Mono'; font-size: 10px; color: var(--text-muted); border: 1px solid var(--border-color); }}
-            table {{ width: 100%; border-collapse: collapse; }}
-            th, td {{ padding: 10px; text-align: left; border-bottom: 1px solid var(--border-color); font-size: 11px; }}
-            
-            @media (max-width: 768px) {{
-                body {{ flex-direction: column; }}
-                .sidebar {{ position: static; width: 100%; height: auto; }}
-                .main {{ margin-left: 0; }}
-                .grid {{ grid-template-columns: repeat(2, 1fr); }}
-            }}
+            body {{ background: #0b0e11; color: #eaecef; font-family: sans-serif; display: flex; padding: 20px; }}
+            .sidebar {{ width: 300px; background: #181a20; padding: 20px; border-radius: 8px; }}
+            .main {{ flex: 1; margin-left: 20px; }}
+            .card {{ background: #181a20; padding: 20px; border-radius: 8px; text-align: center; margin-bottom: 20px; }}
+            .btn-start {{ background: #0ecb81; color: black; padding: 15px; width: 100%; border: none; font-weight: bold; cursor: pointer; }}
+            .btn-stop {{ background: #f6465d; color: white; padding: 15px; width: 100%; border: none; font-weight: bold; cursor: pointer; margin-top: 10px; }}
+            .terminal {{ background: black; color: #848e9c; padding: 15px; height: 300px; overflow-y: auto; font-family: monospace; font-size: 11px; }}
+            .val {{ font-size: 24px; font-weight: bold; color: #fcd535; }}
+            table {{ width: 100%; border-collapse: collapse; margin-top: 20px; }}
+            th, td {{ text-align: left; padding: 10px; border-bottom: 1px solid #2b3139; }}
         </style>
     </head>
     <body>
         <div class="sidebar">
-            <div class="group">
-                <h2 style="font-size:16px;">ALPHA ENGINE <span style="color:var(--accent)">v60.2</span></h2>
-                <div id="st_text" style="font-size:9px; color:var(--text-muted);">{state['status']}</div>
-            </div>
-            <div class="group">
-                <div class="label">API (Bitget Futures)</div>
-                <input type="password" id="api_k" placeholder="API Key" value="{state['settings']['api_key']}">
-                <input type="password" id="api_s" placeholder="API Secret" value="{state['settings']['api_secret']}">
-                <button class="btn-start" onclick="action('/resume')">Initialize Live Trading</button>
-                <button class="btn-stop" onclick="action('/pause')">Halt Engine</button>
-            </div>
-            <div class="group">
-                <div class="label">System Terminal</div>
-                <div id="logs" class="terminal"></div>
-            </div>
+            <h2>LIVE TRADING</h2>
+            <div id="st" style="color:#848e9c; margin-bottom:20px;">{state['status']}</div>
+            <button class="btn-start" onclick="fetch('/resume', {{method:'POST'}})">START REAL MONEY ENGINE</button>
+            <button class="btn-stop" onclick="fetch('/pause', {{method:'POST'}})">HALT ALL TRADING</button>
+            <h3 style="margin-top:30px;">Activity Log</h3>
+            <div id="logs" class="terminal"></div>
         </div>
-
         <div class="main">
-            <div class="grid">
-                <div class="card"><div class="label">Win Rate</div><div id="win" class="val" style="color:var(--up-color)">{state['win_rate']}</div></div>
-                <div class="card"><div class="label">ETH Price</div><div id="pr" class="val">$0.00</div></div>
-                <div class="card"><div class="label">RSI (14)</div><div id="rsi" class="val">0.0</div></div>
-                <div class="card"><div class="label">EMA (200)</div><div id="ema" class="val">$0.00</div></div>
+            <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px;">
+                <div class="card"><div>Price</div><div id="pr" class="val">$0.00</div></div>
+                <div class="card"><div>RSI</div><div id="rsi" class="val">0.0</div></div>
+                <div class="card"><div>EMA 200</div><div id="ema" class="val">$0.00</div></div>
             </div>
-
-            <div class="radar">
-                <div class="label">Execution Signal</div>
-                <div id="sig" class="sig-text">STANDBY</div>
-                <div id="pos" style="color:var(--accent); font-weight:700; font-size:11px;">No Active Session</div>
+            <div class="card" style="padding: 50px;">
+                <div style="font-size: 14px; color:#848e9c;">SIGNAL</div>
+                <div id="sig" style="font-size: 48px; font-weight: bold;">STANDBY</div>
+                <div id="pos" style="margin-top: 10px; color: #fcd535;">No Position</div>
             </div>
-
-            <div class="label">Trade Activity</div>
             <table>
                 <thead><tr><th>ID</th><th>Action</th><th>Price</th><th>PnL</th><th>Time</th></tr></thead>
                 <tbody id="hist"></tbody>
             </table>
         </div>
-
         <script>
-            async function action(ep) {{
-                await fetch(ep, {{method:'POST'}});
-                if(ep === '/resume') {{
-                    const body = {{ api_key: document.getElementById('api_k').value, api_secret: document.getElementById('api_s').value }};
-                    await fetch('/api/settings', {{ method: 'POST', body: JSON.stringify(body), headers: {{'Content-Type':'application/json'}} }});
-                }}
-            }}
-
             async function update() {{
                 const res = await fetch('/api/status');
                 const d = await res.json();
-                
                 document.getElementById('pr').innerText = "$" + d.price;
                 document.getElementById('rsi').innerText = d.rsi;
                 document.getElementById('ema').innerText = "$" + d.ema_200;
-                document.getElementById('st_text').innerText = d.status;
-                
-                const s = document.getElementById('sig');
-                s.innerText = d.signal;
-                if(d.signal.includes("BUY")) s.style.color = "var(--up-color)";
-                else if(d.signal.includes("PROFIT")) s.style.color = "var(--accent)";
-                else s.style.color = "var(--text-muted)";
-
-                const p = document.getElementById('pos');
-                if(d.active_position) {{
-                    p.innerText = "ACTIVE LONG: " + d.active_position.entry + " | Unrealized: " + d.active_position.current_pnl;
-                    p.style.color = d.active_position.current_pnl.includes("-") ? "var(--down-color)" : "var(--up-color)";
-                }} else {{
-                    p.innerText = "Awaiting Signal...";
-                    p.style.color = "var(--text-muted)";
-                }}
-
+                document.getElementById('sig').innerText = d.signal;
+                document.getElementById('st').innerText = d.status;
+                document.getElementById('pos').innerText = d.active_position ? "LONG AT: " + d.active_position.entry + " | " + d.active_position.current_pnl : "No Active Position";
                 document.getElementById('logs').innerHTML = d.logs.map(l => "<div>"+l+"</div>").join("");
-                document.getElementById('hist').innerHTML = d.trade_history.map(t => "<tr><td>"+t.id+"</td><td>"+t.action+"</td><td>"+t.price+"</td><td style='color:var(--up-color)'>"+t.pnl+"</td><td>"+t.time+"</td></tr>").join("");
+                document.getElementById('hist').innerHTML = d.trade_history.map(t => "<tr><td>"+t.id+"</td><td>"+t.action+"</td><td>"+t.price+"</td><td>"+t.pnl+"</td><td>"+t.time+"</td></tr>").join("");
             }}
             setInterval(update, 3000);
         </script>
