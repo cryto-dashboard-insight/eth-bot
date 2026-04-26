@@ -3,7 +3,7 @@ import ccxt
 import threading
 import time
 import pandas as pd
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Form
 from fastapi.responses import HTMLResponse
 
 app = FastAPI()
@@ -12,7 +12,7 @@ app = FastAPI()
 # 1. SYSTEM STATE
 # ---------------------------------------------------------
 state = {
-    "status": "WAITING FOR INITIALIZATION",
+    "status": "OFFLINE - AWAITING KEYS",
     "price": 0.00,
     "rsi": 0.0,
     "ema_200": 0.0,
@@ -20,7 +20,7 @@ state = {
     "is_paused": True,
     "active_position": None,
     "trade_history": [],
-    "logs": ["v62.1 READY. Enter keys and click Initialize."],
+    "logs": ["v63.0 MANUAL MODE READY. Enter keys and click START."],
 }
 
 SYMBOL = "ETH/USDT"
@@ -28,52 +28,31 @@ exchange = None
 
 def add_log(msg):
     state["logs"].insert(0, f"[{time.strftime('%H:%M:%S')}] {msg}")
-    state["logs"] = state["logs"][:30] 
+    state["logs"] = state["logs"][:25] 
 
 # ---------------------------------------------------------
-# 2. FIXED EXECUTION ENGINE (Bitget Price Fix Included)
+# 2. TRADING ENGINE (With Bitget Price Fix)
 # ---------------------------------------------------------
 def execute_trade(side, amount_usd=10):
     global exchange
-    if not exchange:
-        add_log("CRITICAL: Keys not loaded.")
-        return
-
+    if not exchange: return
     try:
         price = state["price"]
         amount_crypto = amount_usd / price
-        
         if side == 'buy':
-            # Fix for "requires price argument" error found in your logs
-            order = exchange.create_market_buy_order(SYMBOL, amount_crypto, {"price": price})
-            state["active_position"] = {
-                "entry": price, 
-                "amount": amount_crypto,
-                "time": time.strftime('%H:%M:%S'), 
-                "current_pnl": "0.000%"
-            }
-            add_log(f"LIVE BUY FILLED: {SYMBOL} at ${price}")
-        
+            # Dummy price added to satisfy Bitget market order requirements
+            exchange.create_market_buy_order(SYMBOL, amount_crypto, {"price": price})
+            state["active_position"] = {"entry": price, "amount": amount_crypto, "time": time.strftime('%H:%M:%S'), "current_pnl": "0.00%"}
+            add_log(f"MANUAL BUY: {SYMBOL} at ${price}")
         elif side == 'sell':
-            order = exchange.create_market_sell_order(SYMBOL, state["active_position"]["amount"])
-            entry = state['active_position']['entry']
-            pnl_val = ((price - entry) / entry) * 100
-            state["trade_history"].insert(0, {
-                "action": "SELL/CLOSE",
-                "price": price,
-                "pnl": f"{round(pnl_val, 3)}%",
-                "time": time.strftime('%H:%M:%S')
-            })
+            exchange.create_market_sell_order(SYMBOL, state["active_position"]["amount"])
             state["active_position"] = None
-            add_log(f"LIVE EXIT FILLED: Closed at ${price} | PnL: {round(pnl_val, 3)}%")
-
+            add_log(f"MANUAL EXIT: Closed at ${price}")
     except Exception as e:
-        add_log(f"API ERROR: {str(e)}")
+        add_log(f"TRADE ERROR: {str(e)}")
 
-# ---------------------------------------------------------
-# 3. ANALYTICS & BOT LOOP
-# ---------------------------------------------------------
 def bot_loop():
+    # Public fetcher for price/RSI updates
     data_fetcher = ccxt.bitget()
     while True:
         try:
@@ -84,159 +63,115 @@ def bot_loop():
             gain = (delta.where(delta > 0, 0)).rolling(14).mean()
             loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
             df['rsi'] = 100 - (100 / (1 + (gain / loss)))
-            
             last = df.iloc[-1]
             state["price"], state["rsi"], state["ema_200"] = round(last['c'], 2), round(last['rsi'], 1), round(last['ema_200'], 2)
             
-            if state["active_position"]:
-                curr_pnl = ((state["price"] - state["active_position"]["entry"]) / state["active_position"]["entry"]) * 100
-                state["active_position"]["current_pnl"] = f"{round(curr_pnl, 3)}%"
-
             if not state["is_paused"]:
-                if state["rsi"] < 35 and state["price"] > state["ema_200"]:
+                if state["rsi"] < 35 and not state["active_position"]:
                     state["signal"] = "BUY SIGNAL"
-                    if not state["active_position"]: execute_trade('buy')
-                elif state["rsi"] > 70:
+                    execute_trade('buy')
+                elif state["rsi"] > 70 and state["active_position"]:
                     state["signal"] = "EXIT SIGNAL"
-                    if state["active_position"]: execute_trade('sell')
-                else: state["signal"] = "NEUTRAL"
+                    execute_trade('sell')
+                else: state["signal"] = "MONITORING"
         except: time.sleep(10)
         time.sleep(5)
 
 threading.Thread(target=bot_loop, daemon=True).start()
 
 # ---------------------------------------------------------
-# 4. WEB INTERFACE (Manual Inputs & Render Port Fix)
+# 3. MANUAL CONTROL DASHBOARD
 # ---------------------------------------------------------
 @app.get("/api/status")
 def get_status(): return state
 
-@app.post("/initialize")
-async def initialize(request: Request):
+@app.post("/start_engine")
+async def start_engine(request: Request):
     global exchange
     form = await request.form()
-    key = form.get("key")
-    secret = form.get("secret")
-    
-    if not key or not secret:
-        add_log("ERROR: Missing Credentials")
-        return
-        
-    exchange = ccxt.bitget({
-        'apiKey': key,
-        'secret': secret,
-        'enableRateLimit': True,
-        'options': {'defaultType': 'future', 'createMarketBuyOrderRequiresPrice': False}
-    })
-    state["is_paused"] = False
-    state["status"] = "LIVE TRADING ACTIVE"
-    add_log("CREDENTIALS LOADED. ENGINE ONLINE.")
+    k, s = form.get("key"), form.get("secret")
+    try:
+        exchange = ccxt.bitget({
+            'apiKey': k, 'secret': s, 'enableRateLimit': True,
+            'options': {'defaultType': 'future', 'createMarketBuyOrderRequiresPrice': False}
+        })
+        state["is_paused"] = False
+        state["status"] = "LIVE - ENGINE RUNNING"
+        add_log("MANUAL START SUCCESS. Engine is now LIVE.")
+    except Exception as e:
+        add_log(f"START FAILED: {str(e)}")
 
-@app.post("/halt")
-def halt():
+@app.post("/stop_engine")
+def stop_engine():
     state["is_paused"] = True
-    state["status"] = "ENGINE HALTED"
-    add_log("Trading paused by user.")
+    state["status"] = "OFFLINE - STOPPED"
+    add_log("MANUAL STOP: Engine halted.")
 
 @app.get("/", response_class=HTMLResponse)
 def home():
-    return f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="UTF-8">
-        <title>Alpha Engine v62.1</title>
-        <style>
-            body {{ background: #0b0e11; color: #eaecef; font-family: sans-serif; display: flex; padding: 20px; }}
-            .sidebar {{ width: 320px; background: #181a20; padding: 20px; border-radius: 8px; }}
-            .main {{ flex: 1; margin-left: 20px; }}
-            .card {{ background: #181a20; padding: 20px; border-radius: 8px; text-align: center; margin-bottom: 20px; }}
-            input {{ width: 100%; padding: 10px; margin: 10px 0; background: #2b3139; border: 1px solid #474d57; color: white; border-radius: 4px; box-sizing: border-box; }}
-            .btn-start {{ background: #0ecb81; color: black; padding: 15px; width: 100%; border: none; font-weight: bold; cursor: pointer; border-radius: 4px; }}
-            .btn-stop {{ background: #f6465d; color: white; padding: 15px; width: 100%; border: none; font-weight: bold; cursor: pointer; margin-top: 10px; border-radius: 4px; }}
-            .terminal {{ background: black; color: #848e9c; padding: 15px; height: 350px; overflow-y: auto; font-family: monospace; font-size: 11px; border-radius: 4px; }}
-            .val {{ font-size: 24px; font-weight: bold; color: #fcd535; }}
-            table {{ width: 100%; border-collapse: collapse; }}
-            th, td {{ text-align: left; padding: 12px; border-bottom: 1px solid #2b3139; }}
-        </style>
-    </head>
+    return """
+    <!DOCTYPE html><html><head><title>Alpha Manual v63</title>
+    <style>
+        body { background: #0b0e11; color: white; font-family: sans-serif; padding: 20px; }
+        .card { background: #181a20; padding: 20px; border-radius: 8px; margin-bottom: 15px; border: 1px solid #2b3139; }
+        input { width: 100%; padding: 12px; margin: 8px 0; background: #2b3139; border: 1px solid #474d57; color: white; border-radius: 4px; }
+        .btn-green { background: #0ecb81; color: black; padding: 15px; width: 100%; border: none; font-weight: bold; cursor: pointer; border-radius: 4px; font-size: 16px; }
+        .btn-red { background: #f6465d; color: white; padding: 10px; width: 100%; border: none; font-weight: bold; cursor: pointer; margin-top: 10px; border-radius: 4px; }
+        .log-box { background: black; color: #848e9c; padding: 15px; height: 250px; overflow-y: auto; font-family: monospace; font-size: 12px; border: 1px solid #2b3139; }
+        .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
+    </style></head>
     <body>
-        <div class="sidebar">
-            <h2 style="color:#fcd535">ALPHA ENGINE v62.1</h2>
-            <div id="st" style="margin-bottom:20px; font-weight:bold;">{state['status']}</div>
-            
-            <div style="background:#2b3139; padding:15px; border-radius:4px; margin-bottom:10px;">
-                <label>Bitget API Key</label>
-                <input type="text" id="apiKey" placeholder="Enter Key...">
-                <label>Bitget Secret</label>
-                <input type="password" id="apiSecret" placeholder="Enter Secret...">
-                <button class="btn-start" onclick="init()">INITIALIZE LIVE TRADING</button>
+        <div style="max-width: 900px; margin: auto; display: flex; gap: 20px;">
+            <div style="width: 350px;">
+                <div class="card">
+                    <h3 style="margin-top:0; color:#fcd535;">MANUAL CONTROL</h3>
+                    <div id="st" style="margin-bottom:10px; font-weight:bold; color:#848e9c;">OFFLINE</div>
+                    <input type="text" id="k" placeholder="Bitget API Key">
+                    <input type="password" id="s" placeholder="Bitget Secret">
+                    <button class="btn-green" onclick="handleStart()">START TRADING ENGINE</button>
+                    <button class="btn-red" onclick="fetch('/stop_engine', {method:'POST'})">EMERGENCY STOP</button>
+                </div>
+                <div class="log-box" id="logs"></div>
             </div>
-            <button class="btn-stop" onclick="fetch('/halt', {{method:'POST'}})">HALT ENGINE</button>
-            
-            <h3 style="margin-top:20px;">System Terminal</h3>
-            <div id="logs" class="terminal"></div>
-        </div>
-        
-        <div class="main">
-            <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px;">
-                <div class="card"><div>Price</div><div id="pr" class="val">$0.00</div></div>
-                <div class="card"><div>RSI</div><div id="rsi" class="val">0.0</div></div>
-                <div class="card"><div>EMA 200</div><div id="ema" class="val">$0.00</div></div>
-            </div>
-            
-            <div class="card" style="padding: 40px;">
-                <div id="sig" style="font-size: 48px; font-weight: bold; color: #eaecef;">STANDBY</div>
-                <div id="pos" style="margin-top: 10px; font-size: 18px; color: #fcd535;">No Open Positions</div>
-            </div>
-
-            <div class="card" style="text-align: left;">
-                <h3 style="margin-top:0;">Trade History</h3>
-                <table>
-                    <thead><tr><th>Action</th><th>Price</th><th>PnL</th><th>Time</th></tr></thead>
-                    <tbody id="hist"></tbody>
-                </table>
+            <div style="flex: 1;">
+                <div class="stat-grid">
+                    <div class="card">PRICE<h2 id="pr" style="color:#fcd535;">$0.00</h2></div>
+                    <div class="card">RSI (14)<h2 id="rsi">0.0</h2></div>
+                </div>
+                <div class="card" style="text-align:center; padding: 60px;">
+                    <div id="sig" style="font-size: 45px; font-weight: bold;">STANDBY</div>
+                    <div id="pos" style="margin-top:15px; color:#848e9c;">No Active Position</div>
+                </div>
             </div>
         </div>
-
         <script>
-            async function init() {{
+            async function handleStart() {
                 const fd = new FormData();
-                fd.append('key', document.getElementById('apiKey').value);
-                fd.append('secret', document.getElementById('apiSecret').value);
-                await fetch('/initialize', {{ method: 'POST', body: fd }});
-            }}
-
-            async function update() {{
-                try {{
-                    const res = await fetch('/api/status');
-                    const d = await res.json();
+                fd.append('key', document.getElementById('k').value);
+                fd.append('secret', document.getElementById('s').value);
+                await fetch('/start_engine', { method: 'POST', body: fd });
+            }
+            async function refresh() {
+                try {
+                    const r = await fetch('/api/status'); const d = await r.json();
                     document.getElementById('pr').innerText = "$" + d.price;
                     document.getElementById('rsi').innerText = d.rsi;
-                    document.getElementById('ema').innerText = "$" + d.ema_200;
-                    document.getElementById('sig').innerText = d.signal;
                     document.getElementById('st').innerText = d.status;
-                    
-                    if(d.signal == "BUY SIGNAL") document.getElementById('sig').style.color = "#0ecb81";
-                    else if(d.signal == "EXIT SIGNAL") document.getElementById('sig').style.color = "#f6465d";
-                    else document.getElementById('sig').style.color = "#eaecef";
-
-                    document.getElementById('pos').innerText = d.active_position ? 
-                        "LONG AT $" + d.active_position.entry + " | Unrealized: " + d.active_position.current_pnl : "No Open Positions";
-                    
+                    document.getElementById('sig').innerText = d.signal;
+                    document.getElementById('pos').innerText = d.active_position ? "LONG: " + d.active_position.current_pnl : "No Active Position";
                     document.getElementById('logs').innerHTML = d.logs.map(l => "<div>"+l+"</div>").join("");
-                    document.getElementById('hist').innerHTML = d.trade_history.map(t => 
-                        "<tr><td>"+t.action+"</td><td>"+t.price+"</td><td>"+t.pnl+"</td><td>"+t.time+"</td></tr>").join("");
-                }} catch (e) {{ console.log("Status update failed"); }}
-            }}
-            setInterval(update, 3000);
+                    if(d.rsi < 35) document.getElementById('sig').style.color = "#0ecb81";
+                    else if(d.rsi > 70) document.getElementById('sig').style.color = "#f6465d";
+                    else document.getElementById('sig').style.color = "white";
+                } catch(e) {}
+            }
+            setInterval(refresh, 3000);
         </script>
-    </body>
-    </html>
+    </body></html>
     """
 
 if __name__ == "__main__":
     import uvicorn
-    # Proper port binding for Render
+    # Correct Render port binding
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
