@@ -7,7 +7,7 @@ app = FastAPI()
 state = {
     "status": "OFFLINE", "price": 0.00, "rsi": 0.0, "ema_200": 0.0,
     "signal": "STANDBY", "is_paused": True, "active_position": None,
-    "logs": ["v67.0 PRO DASHBOARD READY. Spot mode enabled."],
+    "logs": ["v67.1 PRO DASHBOARD. Bitget Spot price fix applied."],
     "history": [] 
 }
 
@@ -26,12 +26,15 @@ def execute_trade(side, amount_usd=10):
         price = state["price"]
         
         if side == 'buy':
+            # Calculate how much ETH $10 can buy
             amount_crypto = amount_usd / price
+            # Format to Bitget's required decimal places
             amt_str = exchange.amount_to_precision(SYMBOL, amount_crypto)
             
-            exchange.create_market_buy_order(SYMBOL, amt_str)
-            state["active_position"] = {"entry": price, "amount": amt_str, "time": time.strftime('%H:%M:%S')}
+            # FIX: Passed 'price' explicitly into the market order
+            exchange.create_order(SYMBOL, 'market', 'buy', amt_str, price)
             
+            state["active_position"] = {"entry": price, "amount": amt_str, "time": time.strftime('%H:%M:%S')}
             state["history"].insert(0, {"time": time.strftime('%H:%M:%S'), "action": "BUY", "price": f"${price}", "pnl": "-"})
             add_log(f"BUY FILLED: {amt_str} {SYMBOL} at ${price}")
             
@@ -40,7 +43,8 @@ def execute_trade(side, amount_usd=10):
                 amt_str = state["active_position"]["amount"]
                 entry = state["active_position"]["entry"]
                 
-                exchange.create_market_sell_order(SYMBOL, amt_str)
+                # FIX: Passed 'price' explicitly into the market order
+                exchange.create_order(SYMBOL, 'market', 'sell', amt_str, price)
                 
                 pnl_usd = (price - entry) * float(amt_str)
                 pnl_pct = ((price - entry) / entry) * 100
