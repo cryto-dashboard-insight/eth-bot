@@ -3,14 +3,11 @@ import ccxt
 import threading
 import time
 import pandas as pd
-from fastapi import FastAPI, Request, Form
+from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 
 app = FastAPI()
 
-# ---------------------------------------------------------
-# 1. SYSTEM STATE
-# ---------------------------------------------------------
 state = {
     "status": "OFFLINE - AWAITING KEYS",
     "price": 0.00,
@@ -20,7 +17,7 @@ state = {
     "is_paused": True,
     "active_position": None,
     "trade_history": [],
-    "logs": ["v63.0 MANUAL MODE READY. Enter keys and click START."],
+    "logs": ["v64.0 READY. Button fixed."],
 }
 
 SYMBOL = "ETH/USDT"
@@ -30,9 +27,6 @@ def add_log(msg):
     state["logs"].insert(0, f"[{time.strftime('%H:%M:%S')}] {msg}")
     state["logs"] = state["logs"][:25] 
 
-# ---------------------------------------------------------
-# 2. TRADING ENGINE (With Bitget Price Fix)
-# ---------------------------------------------------------
 def execute_trade(side, amount_usd=10):
     global exchange
     if not exchange: return
@@ -40,7 +34,6 @@ def execute_trade(side, amount_usd=10):
         price = state["price"]
         amount_crypto = amount_usd / price
         if side == 'buy':
-            # Dummy price added to satisfy Bitget market order requirements
             exchange.create_market_buy_order(SYMBOL, amount_crypto, {"price": price})
             state["active_position"] = {"entry": price, "amount": amount_crypto, "time": time.strftime('%H:%M:%S'), "current_pnl": "0.00%"}
             add_log(f"MANUAL BUY: {SYMBOL} at ${price}")
@@ -52,7 +45,6 @@ def execute_trade(side, amount_usd=10):
         add_log(f"TRADE ERROR: {str(e)}")
 
 def bot_loop():
-    # Public fetcher for price/RSI updates
     data_fetcher = ccxt.bitget()
     while True:
         try:
@@ -79,25 +71,28 @@ def bot_loop():
 
 threading.Thread(target=bot_loop, daemon=True).start()
 
-# ---------------------------------------------------------
-# 3. MANUAL CONTROL DASHBOARD
-# ---------------------------------------------------------
 @app.get("/api/status")
 def get_status(): return state
 
 @app.post("/start_engine")
 async def start_engine(request: Request):
     global exchange
-    form = await request.form()
-    k, s = form.get("key"), form.get("secret")
     try:
+        data = await request.json()
+        k = data.get("key")
+        s = data.get("secret")
+        
+        if not k or not s:
+            add_log("ERROR: Please enter both keys.")
+            return
+
         exchange = ccxt.bitget({
             'apiKey': k, 'secret': s, 'enableRateLimit': True,
             'options': {'defaultType': 'future', 'createMarketBuyOrderRequiresPrice': False}
         })
         state["is_paused"] = False
         state["status"] = "LIVE - ENGINE RUNNING"
-        add_log("MANUAL START SUCCESS. Engine is now LIVE.")
+        add_log("SUCCESS: Engine is now LIVE.")
     except Exception as e:
         add_log(f"START FAILED: {str(e)}")
 
@@ -110,7 +105,7 @@ def stop_engine():
 @app.get("/", response_class=HTMLResponse)
 def home():
     return """
-    <!DOCTYPE html><html><head><title>Alpha Manual v63</title>
+    <!DOCTYPE html><html><head><title>Alpha Manual v64</title>
     <style>
         body { background: #0b0e11; color: white; font-family: sans-serif; padding: 20px; }
         .card { background: #181a20; padding: 20px; border-radius: 8px; margin-bottom: 15px; border: 1px solid #2b3139; }
@@ -146,10 +141,15 @@ def home():
         </div>
         <script>
             async function handleStart() {
-                const fd = new FormData();
-                fd.append('key', document.getElementById('k').value);
-                fd.append('secret', document.getElementById('s').value);
-                await fetch('/start_engine', { method: 'POST', body: fd });
+                const payload = {
+                    key: document.getElementById('k').value,
+                    secret: document.getElementById('s').value
+                };
+                await fetch('/start_engine', { 
+                    method: 'POST', 
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
             }
             async function refresh() {
                 try {
@@ -172,6 +172,5 @@ def home():
 
 if __name__ == "__main__":
     import uvicorn
-    # Correct Render port binding
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
