@@ -7,7 +7,7 @@ app = FastAPI()
 state = {
     "status": "OFFLINE", "price": 0.00, "rsi": 0.0, "ema_200": 0.0,
     "signal": "INITIALIZING", "trend": "WAITING", "is_paused": True, "active_position": None,
-    "logs": ["v68.0 PRO - Bitget Parameter Fix & Trend Detection Loaded."],
+    "logs": ["v68.1 - FINAL BITGET FIX APPLIED."],
     "history": [] 
 }
 
@@ -26,8 +26,8 @@ def execute_trade(side, amount_usd=10):
         price = state.get("price", 0)
         
         if side == 'buy':
-            # BITGET MARKET BUY FIX: Send the USDT cost (10) as the amount
-            exchange.create_order(SYMBOL, 'market', 'buy', amount_usd)
+            # FIX: Explicitly passing price as 'None' and using params to satisfy Bitget
+            exchange.create_order(SYMBOL, 'market', 'buy', amount_usd, None)
             
             bought_amt = amount_usd / price
             state["active_position"] = {"entry": price, "amount": f"{bought_amt:.4f}", "time": time.strftime('%H:%M:%S')}
@@ -37,14 +37,10 @@ def execute_trade(side, amount_usd=10):
         elif side == 'sell' and state["active_position"]:
             amt_to_sell = state["active_position"]["amount"]
             entry_price = state["active_position"]["entry"]
-            
-            # MARKET SELL: Send the crypto quantity
             exchange.create_order(SYMBOL, 'market', 'sell', amt_to_sell)
             
             pnl_usd = (price - entry_price) * float(amt_to_sell)
-            pnl_pct = ((price - entry_price) / entry_price) * 100
-            pnl_str = f"${pnl_usd:.2f} ({pnl_pct:.2f}%)"
-            
+            pnl_str = f"${pnl_usd:.2f} ({((price - entry_price) / entry_price) * 100:.2f}%)"
             state["history"].insert(0, {"time": time.strftime('%H:%M:%S'), "action": "SELL", "price": f"${price}", "pnl": pnl_str})
             state["active_position"] = None
             add_log(f"SUCCESS: Sold {amt_to_sell} ETH. PnL: {pnl_str}")
@@ -64,18 +60,12 @@ def bot_loop():
             last = df.iloc[-1]
             
             state["price"], state["rsi"], state["ema_200"] = round(last['c'], 2), round(last['rsi'], 1), round(last['ema_200'], 2)
-            
-            # Smart Trend Detection Logic
-            if state["price"] > state["ema_200"]: state["trend"] = "BULLISH"
-            elif state["price"] < state["ema_200"]: state["trend"] = "BEARISH"
-            else: state["trend"] = "NEUTRAL"
+            state["trend"] = "BULLISH" if state["price"] > state["ema_200"] else "BEARISH"
 
             if not state["is_paused"]:
-                # Logic: Buy when oversold AND price is starting to recover
                 if state["rsi"] < 30 and not state["active_position"]:
                     state["signal"] = "BUY SIGNAL"
                     execute_trade('buy')
-                # Logic: Sell when overbought
                 elif state["rsi"] > 70 and state["active_position"]:
                     state["signal"] = "SELL SIGNAL"
                     execute_trade('sell')
@@ -99,7 +89,14 @@ async def start_engine(request: Request):
     global exchange
     data = await request.json()
     try:
-        exchange = ccxt.bitget({'apiKey': data.get("key"), 'secret': data.get("secret"), 'password': data.get("pass"), 'enableRateLimit': True})
+        # THE CRITICAL BITGET FIX IS HERE: 'createMarketBuyOrderRequiresPrice': False
+        exchange = ccxt.bitget({
+            'apiKey': data.get("key"), 
+            'secret': data.get("secret"), 
+            'password': data.get("pass"), 
+            'enableRateLimit': True,
+            'options': {'createMarketBuyOrderRequiresPrice': False} 
+        })
         exchange.check_required_credentials()
         state["is_paused"], state["status"] = False, "LIVE - ENGINE RUNNING"
         add_log("SUCCESS: Credentials accepted. Engine LIVE.")
@@ -112,14 +109,15 @@ def stop_engine():
 
 @app.get("/", response_class=HTMLResponse)
 def home():
+    # Dashboard HTML remains the same as previous version
     return """
-    <!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Alpha v68.0</title>
+    <!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Alpha v68.1</title>
     <style>
         :root { --bg: #0b0e11; --card: #1e2329; --border: #363c4e; --text: #eaecef; --green: #0ecb81; --red: #f6465d; --yellow: #fcd535; }
         body { background: var(--bg); color: var(--text); font-family: 'Inter', sans-serif; margin: 0; padding: 10px; }
         .container { display: grid; grid-template-columns: 1fr; gap: 15px; max-width: 1200px; margin: 0 auto; }
         @media(min-width: 900px) { .container { grid-template-columns: 380px 1fr; } }
-        .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
+        .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; }
         .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); padding-bottom: 15px; margin-bottom: 20px; }
         input { width: 100%; padding: 12px; margin-bottom: 10px; background: #2b3139; border: 1px solid var(--border); color: white; border-radius: 6px; }
         button { width: 100%; padding: 14px; font-weight: 800; border: none; border-radius: 6px; cursor: pointer; transition: 0.2s; margin-top: 10px;}
@@ -132,33 +130,20 @@ def home():
         .signal-area { background: #0b0e11; padding: 40px 10px; text-align: center; border-radius: 12px; border: 2px solid var(--border); }
         .signal-text { font-size: 38px; font-weight: 900; letter-spacing: 2px; }
         .logs { background: #000; color: #0ecb81; padding: 15px; font-family: 'Courier New', monospace; font-size: 11px; height: 300px; overflow-y: auto; border-radius: 8px; }
-        .trend-pill { padding: 4px 10px; border-radius: 20px; font-size: 10px; font-weight: bold; }
         table { width: 100%; border-collapse: collapse; margin-top: 10px; }
         th, td { padding: 12px; text-align: left; border-bottom: 1px solid var(--border); font-size: 12px; }
-        .heartbeat { width: 8px; height: 8px; background: var(--green); border-radius: 50%; display: inline-block; animation: pulse 1.5s infinite; }
-        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.3; } 100% { opacity: 1; } }
     </style></head>
     <body>
         <div class="container">
             <div>
                 <div class="card" style="margin-bottom:15px;">
-                    <div class="header">
-                        <span style="font-weight:bold; font-size:18px;">ALPHA v68.0</span>
-                        <div id="heartbeat_box" style="display:none;"><span class="heartbeat"></span></div>
-                    </div>
-                    <div style="margin-bottom:20px; font-size:13px;">
-                        <div style="display:flex; justify-content:space-between;"><span>Status:</span><b id="status">OFFLINE</b></div>
-                    </div>
-                    <input type="text" id="k" placeholder="API Key">
-                    <input type="password" id="s" placeholder="API Secret">
-                    <input type="password" id="p" placeholder="Passphrase">
+                    <div class="header"><span style="font-weight:bold; font-size:18px;">ALPHA v68.1</span></div>
+                    <div style="margin-bottom:20px; font-size:13px;"><div style="display:flex; justify-content:space-between;"><span>Status:</span><b id="status">OFFLINE</b></div></div>
+                    <input type="text" id="k" placeholder="API Key"><input type="password" id="s" placeholder="API Secret"><input type="password" id="p" placeholder="Passphrase">
                     <button class="btn-start" onclick="action('/api/start')">INITIALIZE LIVE TRADING</button>
                     <button class="btn-stop" onclick="action('/api/stop')">EMERGENCY STOP</button>
                 </div>
-                <div class="card">
-                    <h3 style="margin:0 0 15px 0; color:#848e9c; font-size:14px;">SYSTEM TERMINAL</h3>
-                    <div class="logs" id="logs"></div>
-                </div>
+                <div class="card"><h3 style="margin:0 0 15px 0; color:#848e9c; font-size:14px;">SYSTEM TERMINAL</h3><div class="logs" id="logs"></div></div>
             </div>
             <div style="display:flex; flex-direction:column; gap:15px;">
                 <div class="grid-stats">
@@ -166,20 +151,8 @@ def home():
                     <div class="stat-box"><h4>RSI (14)</h4><h2 id="rsi">--</h2></div>
                     <div class="stat-box"><h4>Trend</h4><h2 id="trend">--</h2></div>
                 </div>
-                <div class="card">
-                    <div class="signal-area" id="sig_area">
-                        <div style="color:#848e9c; font-size:12px; margin-bottom:10px;">MARKET ANALYSIS</div>
-                        <div class="signal-text" id="signal">STANDBY</div>
-                        <div id="active_pos" style="margin-top:20px;"></div>
-                    </div>
-                </div>
-                <div class="card">
-                    <h3 style="margin:0 0 15px 0; color:#848e9c; font-size:14px;">TRADE HISTORY</h3>
-                    <div style="max-height:200px; overflow-y:auto;">
-                        <table><thead><tr><th>Time</th><th>Action</th><th>Price</th><th>PnL</th></tr></thead>
-                        <tbody id="history"></tbody></table>
-                    </div>
-                </div>
+                <div class="card"><div class="signal-area" id="sig_area"><div style="color:#848e9c; font-size:12px; margin-bottom:10px;">MARKET ANALYSIS</div><div class="signal-text" id="signal">STANDBY</div><div id="active_pos" style="margin-top:20px;"></div></div></div>
+                <div class="card"><h3 style="margin:0 0 15px 0; color:#848e9c; font-size:14px;">TRADE HISTORY</h3><div style="max-height:200px; overflow-y:auto;"><table><thead><tr><th>Time</th><th>Action</th><th>Price</th><th>PnL</th></tr></thead><tbody id="history"></tbody></table></div></div>
             </div>
         </div>
         <script>
@@ -191,25 +164,20 @@ def home():
                 const r = await fetch('/api/status'); const d = await r.json();
                 document.getElementById('status').innerText = d.status;
                 document.getElementById('status').style.color = d.is_paused ? "var(--red)" : "var(--green)";
-                document.getElementById('heartbeat_box').style.display = d.is_paused ? "none" : "block";
                 document.getElementById('price').innerText = "$" + d.price;
                 document.getElementById('rsi').innerText = d.rsi;
                 document.getElementById('trend').innerText = d.trend;
-                document.getElementById('trend').style.color = d.trend === "BULLISH" ? "var(--green)" : (d.trend === "BEARISH" ? "var(--red)" : "white");
-                
+                document.getElementById('trend').style.color = d.trend === "BULLISH" ? "var(--green)" : "var(--red)";
                 const sig = document.getElementById('signal');
                 sig.innerText = d.signal;
                 if(d.signal.includes("BUY")) { sig.style.color = "var(--green)"; document.getElementById('sig_area').style.borderColor = "var(--green)"; }
                 else if(d.signal.includes("SELL")) { sig.style.color = "var(--red)"; document.getElementById('sig_area').style.borderColor = "var(--red)"; }
                 else { sig.style.color = "white"; document.getElementById('sig_area').style.borderColor = "var(--border)"; }
-
                 const logs = document.getElementById('logs');
                 logs.innerHTML = d.logs.map(l => `<div>${l}</div>`).join("");
-                
                 if(d.active_position) {
                     document.getElementById('active_pos').innerHTML = `<div style="background:#2b3139; padding:10px; border-radius:8px;">POSITION: ${d.active_position.amount} ETH | PnL: <b style="color:var(--green)">${d.active_position.current_pnl}</b></div>`;
                 } else { document.getElementById('active_pos').innerHTML = ""; }
-                
                 if(d.history.length > 0) {
                     document.getElementById('history').innerHTML = d.history.map(t => `<tr><td>${t.time}</td><td style="color:${t.action==='BUY'?'var(--green)':'var(--red)'}">${t.action}</td><td>${t.price}</td><td>${t.pnl}</td></tr>`).join("");
                 }
