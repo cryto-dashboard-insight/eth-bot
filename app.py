@@ -9,6 +9,17 @@ from fastapi.responses import HTMLResponse
 
 app = FastAPI()
 
+# ================== CONFIG ==================
+TRADING_MODE = "spot"          # Change to "futures" when ready
+SYMBOL = "ETH/USDT"
+RISK_PERCENT = 0.01            # 1% risk per trade
+MAX_DAILY_LOSS_PCT = 0.05      # 5% daily max loss
+STOP_LOSS_PCT = 0.08           # 8% SL
+TAKE_PROFIT_PCT = 0.16         # 16% TP (2:1)
+LEVERAGE = 10                  # Only used in futures mode
+MIN_ORDER_USDT = 7.0           # Safety minimum to avoid Bitget rejection
+# ===========================================
+
 state = {
     "status": "OFFLINE", 
     "price": 0.00, 
@@ -18,15 +29,9 @@ state = {
     "trend": "WAITING", 
     "is_paused": True, 
     "active_position": None,
-    "logs": ["v68.3 - FULL ADVANCED: SL/TP + 15m TREND FILTER + RISK MGMT"],
+    "logs": [f"v68.4 - {TRADING_MODE.upper()} MODE | Min order fixed + Spot/Futures switch"],
     "history": [] 
 }
-
-SYMBOL = "ETH/USDT"
-RISK_PERCENT = 0.01          # 1% of USDT balance per trade
-MAX_DAILY_LOSS_PCT = 0.05    # 5% daily loss limit
-STOP_LOSS_PCT = 0.08         # 8% stop loss
-TAKE_PROFIT_PCT = 0.16       # 16% take profit (2:1 R:R)
 
 exchange = None
 daily_pnl = 0.0
@@ -40,11 +45,15 @@ def add_log(msg):
 def get_usdt_balance():
     try:
         if not exchange: return 0.0
-        balance = exchange.fetch_balance()
-        usdt = (balance.get('total', {}).get('USDT') or 
-                balance.get('USDT', {}).get('free') or 0)
+        if TRADING_MODE == "futures":
+            balance = exchange.fetch_balance(params={'type': 'swap'})
+            usdt = balance.get('total', {}).get('USDT') or balance.get('USDT', {}).get('free', 0)
+        else:
+            balance = exchange.fetch_balance()
+            usdt = balance.get('total', {}).get('USDT') or balance.get('USDT', {}).get('free', 0)
         return float(usdt)
-    except:
+    except Exception as e:
+        add_log(f"Balance error: {str(e)}")
         return 0.0
 
 def execute_trade(side):
@@ -55,17 +64,26 @@ def execute_trade(side):
         price = state.get("price", 0)
         if price <= 0: return
 
+        usdt_balance = get_usdt_balance()
+        if usdt_balance < MIN_ORDER_USDT:
+            add_log(f"❌ Low balance: ${usdt_balance:.2f} (need ≥ ${MIN_ORDER_USDT})")
+            return
+
         if side == 'buy' and not state["active_position"]:
-            usdt_balance = get_usdt_balance()
-            if usdt_balance < 10:
-                add_log("Insufficient USDT for trade")
-                return
-
             risk_amount = usdt_balance * RISK_PERCENT
-            cost = risk_amount * 8  # \~8x risk for reasonable position size (adjust if needed)
+            cost = max(risk_amount * 8, MIN_ORDER_USDT + 1.0)
+            cost = min(cost, usdt_balance * 0.30)   # safety cap
 
-            # Bitget-friendly market buy with cost
-            order = exchange.create_market_buy_order_with_cost(SYMBOL, cost)
+            add_log(f"Attempting BUY | Balance: ${usdt_balance:.2f} | Cost: ${cost:.2f}")
+
+            if TRADING_MODE == "futures":
+                exchange.set_leverage(LEVERAGE, SYMBOL)
+                # For futures: use amount in base currency
+                amount = exchange.amount_to_precision(SYMBOL, cost / price)
+                order = exchange.create_order(SYMBOL, 'market', 'buy', amount, params={'marginMode': 'cross'})
+            else:
+                # Spot: use cost method
+                order = exchange.create_market_buy_order_with_cost(SYMBOL, cost)
 
             filled_cost = float(order.get('cost', cost))
             filled_amount = float(order.get('filled', filled_cost / price))
@@ -78,13 +96,16 @@ def execute_trade(side):
                 "sl_price": round(price * (1 - STOP_LOSS_PCT), 2),
                 "tp_price": round(price * (1 + TAKE_PROFIT_PCT), 2)
             }
-            add_log(f"BUY EXECUTED: \~${filled_cost:.2f} USDT | SL: ${state['active_position']['sl_price']} | TP: ${state['active_position']['tp_price']}")
+            add_log(f"✅ BUY SUCCESS: ${filled_cost:.2f} | {filled_amount:.6f} ETH | SL: ${state['active_position']['sl_price']}")
 
         elif side == 'sell' and state["active_position"]:
             pos = state["active_position"]
             amt = exchange.amount_to_precision(SYMBOL, pos["amount"])
 
-            order = exchange.create_market_sell_order(SYMBOL, amt)
+            if TRADING_MODE == "futures":
+                order = exchange.create_order(SYMBOL, 'market', 'sell', amt, params={'marginMode': 'cross'})
+            else:
+                order = exchange.create_market_sell_order(SYMBOL, amt)
 
             current_price = state["price"]
             pnl_usd = (current_price - pos["entry"]) * float(pos["amount"])
@@ -98,24 +119,26 @@ def execute_trade(side):
                 "price": f"${current_price:.2f}",
                 "pnl": pnl_str
             })
-
-            add_log(f"SELL EXECUTED | PnL: {pnl_str} | Reason: Signal/SL/TP")
+            add_log(f"✅ SELL | PnL: {pnl_str}")
             state["active_position"] = None
 
     except Exception as e:
-        add_log(f"TRADE ERROR ({side}): {str(e)}")
+        err = str(e).lower()
+        if "45110" in err or "minimum" in err or "less than" in err:
+            add_log(f"❌ Bitget minimum order error. Balance: ${usdt_balance:.2f} → Deposit more or switch to futures.")
+        else:
+            add_log(f"TRADE ERROR ({side}): {str(e)}")
 
 def check_sl_tp():
-    """Monitor active position for stop-loss or take-profit"""
     if not state.get("active_position"): return
     pos = state["active_position"]
     price = state["price"]
 
-    if price <= pos["sl_price"]:
-        add_log(f"STOP-LOSS HIT at ${price}")
+    if price <= pos.get("sl_price", 0):
+        add_log(f"🛑 STOP-LOSS HIT at ${price}")
         execute_trade('sell')
-    elif price >= pos["tp_price"]:
-        add_log(f"TAKE-PROFIT HIT at ${price}")
+    elif price >= pos.get("tp_price", 999999):
+        add_log(f"🎯 TAKE-PROFIT HIT at ${price}")
         execute_trade('sell')
 
 def bot_loop():
@@ -130,12 +153,13 @@ def bot_loop():
                 daily_reset_time = now
                 add_log("Daily PnL reset")
 
-            if daily_pnl < -(get_usdt_balance() * MAX_DAILY_LOSS_PCT) and not state["is_paused"]:
+            usdt_balance = get_usdt_balance()
+            if daily_pnl < -(usdt_balance * MAX_DAILY_LOSS_PCT) and not state["is_paused"]:
                 state["is_paused"] = True
                 state["status"] = "PAUSED - DAILY LOSS LIMIT"
-                add_log("EMERGENCY PAUSE: Daily loss limit reached")
+                add_log("🚨 EMERGENCY PAUSE: Daily loss limit reached")
 
-            # Fetch 1m data for RSI + fast EMA
+            # 1m data
             bars_1m = fetcher.fetch_ohlcv(SYMBOL, timeframe='1m', limit=210)
             df_1m = pd.DataFrame(bars_1m, columns=['ts', 'o', 'h', 'l', 'c', 'v'])
             df_1m['ema_200'] = df_1m['c'].ewm(span=200, adjust=False).mean()
@@ -149,37 +173,38 @@ def bot_loop():
             state["rsi"] = round(float(last_1m['rsi']), 1)
             state["ema_200"] = round(float(last_1m['ema_200']), 2)
 
-            # Higher timeframe (15m) for trend confirmation
+            # 15m trend filter
             bars_15m = fetcher.fetch_ohlcv(SYMBOL, timeframe='15m', limit=100)
             df_15m = pd.DataFrame(bars_15m, columns=['ts', 'o', 'h', 'l', 'c', 'v'])
             df_15m['ema_200'] = df_15m['c'].ewm(span=200, adjust=False).mean()
-            trend_15m = "BULLISH" if df_15m.iloc[-1]['c'] > df_15m.iloc[-1]['ema_200'] else "BEARISH"
+            trend_15m = "BULLISH" if float(df_15m.iloc[-1]['c']) > float(df_15m.iloc[-1]['ema_200']) else "BEARISH"
 
             state["trend"] = "BULLISH" if state["price"] > state["ema_200"] else "BEARISH"
 
             if not state["is_paused"]:
-                check_sl_tp()  # Check SL/TP first
+                check_sl_tp()
 
                 if (state["rsi"] < 35 and 
                     state["price"] > state["ema_200"] and 
                     trend_15m == "BULLISH" and 
                     not state["active_position"]):
-                    state["signal"] = "BUY SIGNAL (1m + 15m Trend Confirmed)"
+                    state["signal"] = f"BUY SIGNAL ({TRADING_MODE.upper()} + 15m Confirmed)"
                     execute_trade('buy')
                 
-                elif (state["rsi"] > 70 and state["active_position"]):
+                elif state["rsi"] > 70 and state["active_position"]:
                     state["signal"] = "SELL SIGNAL (Overbought)"
                     execute_trade('sell')
                 else:
                     state["signal"] = "HOLDING" if state["active_position"] else "MONITORING"
 
         except Exception as e:
-            add_log(f"Bot loop error: {str(e)}")
+            add_log(f"Loop error: {str(e)}")
         
         time.sleep(5)
 
 threading.Thread(target=bot_loop, daemon=True).start()
 
+# FastAPI endpoints (unchanged except status message)
 @app.get("/api/status")
 def get_status(): 
     if state["active_position"]:
@@ -198,12 +223,12 @@ async def start_engine(request: Request):
             'secret': data.get("secret"), 
             'password': data.get("pass"), 
             'enableRateLimit': True,
-            'options': {'createMarketBuyOrderRequiresPrice': False}
+            'options': {'createMarketBuyOrderRequiresPrice': False, 'defaultType': 'spot' if TRADING_MODE == "spot" else 'swap'}
         })
         exchange.check_required_credentials()
         state["is_paused"] = False
-        state["status"] = "LIVE - ADVANCED ENGINE RUNNING"
-        add_log("SUCCESS: Credentials accepted. SL/TP + Trend Filter ACTIVE.")
+        state["status"] = f"LIVE - {TRADING_MODE.upper()} MODE RUNNING"
+        add_log(f"✅ Credentials OK. {TRADING_MODE.upper()} mode with SL/TP active.")
     except Exception as e:
         add_log(f"KEY ERROR: {str(e)}")
 
@@ -211,13 +236,11 @@ async def start_engine(request: Request):
 def stop_engine():
     state["is_paused"] = True
     state["status"] = "OFFLINE"
-    add_log("HALT: Trading paused by user.")
+    add_log("HALT: Trading paused.")
 
 @app.get("/", response_class=HTMLResponse)
 def home():
-    # Original dashboard HTML (unchanged - only title updated for version)
-    return """
-    <!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Alpha v68.3</title>
+    return """<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Alpha v68.4</title>
     <style>
         :root { --bg: #0b0e11; --card: #1e2329; --border: #363c4e; --text: #eaecef; --green: #0ecb81; --red: #f6465d; --yellow: #fcd535; }
         body { background: var(--bg); color: var(--text); font-family: 'Inter', sans-serif; margin: 0; padding: 10px; }
@@ -243,7 +266,7 @@ def home():
         <div class="container">
             <div>
                 <div class="card" style="margin-bottom:15px;">
-                    <div class="header"><span style="font-weight:bold; font-size:18px;">ALPHA v68.3</span></div>
+                    <div class="header"><span style="font-weight:bold; font-size:18px;">ALPHA v68.4</span></div>
                     <div style="margin-bottom:20px; font-size:13px;"><div style="display:flex; justify-content:space-between;"><span>Status:</span><b id="status">OFFLINE</b></div></div>
                     <input type="text" id="k" placeholder="API Key"><input type="password" id="s" placeholder="API Secret"><input type="password" id="p" placeholder="Passphrase">
                     <button class="btn-start" onclick="action('/api/start')">INITIALIZE LIVE TRADING</button>
@@ -264,7 +287,7 @@ def home():
         <script>
             async function action(path) {
                 const body = JSON.stringify({key:document.getElementById('k').value, secret:document.getElementById('s').value, pass:document.getElementById('p').value});
-                await fetch(path, {method:'POST', headers:{'Content-Type':'json'}, body});
+                await fetch(path, {method:'POST', headers:{'Content-Type':'application/json'}, body});
             }
             async function update() {
                 const r = await fetch('/api/status'); const d = await r.json();
