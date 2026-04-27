@@ -32,7 +32,7 @@ state = {
     "active_position": None,
     "balance": FORCED_BALANCE,
     "mode": "FUTURES",
-    "logs": ["v69.0 - Complete Hybrid EMA + RSI + Long/Short + Force Buttons"],
+    "logs": ["v69.1 - UI Fixed, Compact Buttons, Status Restored."],
     "history": [] 
 }
 
@@ -191,7 +191,6 @@ def bot_loop():
                 state["status"] = "PAUSED - DAILY LOSS LIMIT"
                 add_log("🚨 DAILY LOSS LIMIT REACHED")
 
-            # 1m data for EMA crossover + RSI
             bars = fetcher.fetch_ohlcv(SYMBOL, timeframe='1m', limit=210)
             df = pd.DataFrame(bars, columns=['ts', 'o', 'h', 'l', 'c', 'v'])
             df['ema_fast'] = df['c'].ewm(span=50, adjust=False).mean()
@@ -215,10 +214,10 @@ def bot_loop():
                 check_sl_tp()
 
                 if crossover_long and state["rsi"] < 45 and not state["active_position"]:
-                    state["signal"] = "LONG SIGNAL (EMA + RSI)"
+                    state["signal"] = "LONG SIGNAL"
                     execute_trade('long')
                 elif crossover_short and state["rsi"] > 55 and not state["active_position"]:
-                    state["signal"] = "SHORT SIGNAL (EMA + RSI)"
+                    state["signal"] = "SHORT SIGNAL"
                     execute_trade('short')
                 elif state["active_position"]:
                     state["signal"] = f"HOLDING {state['active_position'].get('side', '')}"
@@ -226,7 +225,7 @@ def bot_loop():
                     state["signal"] = "MONITORING"
 
         except Exception as e:
-            add_log(f"Loop error: {str(e)}")
+            pass
         time.sleep(5)
 
 threading.Thread(target=bot_loop, daemon=True).start()
@@ -257,8 +256,8 @@ async def start_engine(request: Request):
         exchange.check_required_credentials()
         get_usdt_balance()
         state["is_paused"] = False
-        state["status"] = f"LIVE - {mode} MODE RUNNING"
-        add_log(f"✅ Started in {mode} mode | Using ${state['balance']:.2f} USDT")
+        state["status"] = f"LIVE - RUNNING"
+        add_log(f"✅ Started | Using ${state['balance']:.2f} USDT")
     except Exception as e:
         add_log(f"❌ STARTUP ERROR: {str(e)}")
 
@@ -278,18 +277,24 @@ async def force_trade(request: Request):
 @app.get("/", response_class=HTMLResponse)
 def home():
     return """
-    <!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Alpha v69.0</title>
+    <!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Alpha v69.1</title>
     <style>
         :root { --bg: #0b0e11; --card: #1e2329; --border: #363c4e; --text: #eaecef; --green: #0ecb81; --red: #f6465d; --yellow: #fcd535; }
         body { background: var(--bg); color: var(--text); font-family: 'Inter', sans-serif; margin: 0; padding: 10px; }
         .container { display: grid; grid-template-columns: 1fr; gap: 15px; max-width: 1200px; margin: 0 auto; }
         @media(min-width: 900px) { .container { grid-template-columns: 380px 1fr; } }
         .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; }
+        .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); padding-bottom: 15px; margin-bottom: 15px; }
         input, select, button { width: 100%; padding: 12px; margin-bottom: 10px; background: #2b3139; border: 1px solid var(--border); color: white; border-radius: 6px; }
-        button { font-weight: 800; cursor: pointer; }
+        button { font-weight: 800; cursor: pointer; border: none; }
         .btn-start { background: var(--green); color: #000; }
         .btn-stop { background: var(--red); color: #fff; }
-        .btn-force { background: #fcd535; color: #000; margin: 5px 0; }
+        
+        /* New Compact Grid for Force Buttons */
+        .grid-force-btns { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 10px; }
+        .btn-force { background: #fcd535; color: #000; margin: 0; font-size: 11px; padding: 10px; }
+        .btn-close { background: var(--red); color: white; margin: 0; font-size: 11px; padding: 10px; }
+
         .grid-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 15px; }
         .stat-box { background: #2b3139; padding: 12px; border-radius: 8px; text-align: center; }
         .stat-box h4 { margin: 0; color: #848e9c; font-size: 10px; text-transform: uppercase; }
@@ -300,9 +305,14 @@ def home():
         <div class="container">
             <div>
                 <div class="card">
-                    <div class="header"><span style="font-weight:bold; font-size:18px;">ALPHA v69.0</span></div>
+                    <div class="header"><span style="font-weight:bold; font-size:18px;">ALPHA v69.1</span></div>
+                    
+                    <div style="display:flex; justify-content:space-between; margin-bottom: 15px; font-size: 13px;">
+                        <span>System Status:</span><b id="status" style="color: var(--red);">OFFLINE</b>
+                    </div>
+
                     <select id="mode_select">
-                        <option value="FUTURES" selected>Futures (Recommended for small balance)</option>
+                        <option value="FUTURES" selected>Futures (Recommended)</option>
                         <option value="SPOT">Spot</option>
                     </select>
                     <input type="text" id="k" placeholder="API Key">
@@ -310,9 +320,12 @@ def home():
                     <input type="password" id="p" placeholder="Passphrase">
                     <button class="btn-start" onclick="startBot()">INITIALIZE LIVE TRADING</button>
                     <button class="btn-stop" onclick="stopBot()">EMERGENCY STOP</button>
-                    <button class="btn-force" onclick="forceTrade('long')">FORCE LONG NOW</button>
-                    <button class="btn-force" onclick="forceTrade('short')">FORCE SHORT NOW</button>
-                    <button class="btn-force" onclick="forceTrade('close')">FORCE CLOSE POSITION</button>
+                    
+                    <div class="grid-force-btns">
+                        <button class="btn-force" onclick="forceTrade('long')">LONG</button>
+                        <button class="btn-force" onclick="forceTrade('short')">SHORT</button>
+                        <button class="btn-close" onclick="forceTrade('close')">CLOSE</button>
+                    </div>
                 </div>
                 <div class="card"><h3 style="margin:0 0 15px 0; color:#848e9c; font-size:14px;">SYSTEM TERMINAL</h3><div class="logs" id="logs"></div></div>
             </div>
@@ -352,27 +365,35 @@ def home():
                 });
             }
             async function update() {
-                const r = await fetch('/api/status'); 
-                const d = await r.json();
-                document.getElementById('status').innerText = d.status || 'OFFLINE';
-                document.getElementById('price').innerText = "$" + d.price;
-                document.getElementById('rsi').innerText = d.rsi;
-                document.getElementById('trend').innerText = d.trend;
-                document.getElementById('balance').innerText = "$" + (d.balance || 0);
+                try {
+                    const r = await fetch('/api/status'); 
+                    const d = await r.json();
+                    
+                    const statusEl = document.getElementById('status');
+                    statusEl.innerText = d.status || 'OFFLINE';
+                    statusEl.style.color = d.is_paused ? 'var(--red)' : 'var(--green)';
 
-                const sig = document.getElementById('signal');
-                sig.innerText = d.signal;
-                if (d.signal.includes("LONG")) sig.style.color = "#0ecb81";
-                else if (d.signal.includes("SHORT")) sig.style.color = "#f6465d";
-                else sig.style.color = "white";
+                    document.getElementById('price').innerText = "$" + d.price;
+                    document.getElementById('rsi').innerText = d.rsi;
+                    document.getElementById('trend').innerText = d.trend;
+                    document.getElementById('balance').innerText = "$" + (d.balance || 0);
 
-                const logs = document.getElementById('logs');
-                logs.innerHTML = d.logs.map(l => `<div>${l}</div>`).join("");
+                    const sig = document.getElementById('signal');
+                    sig.innerText = d.signal;
+                    if (d.signal.includes("LONG")) sig.style.color = "#0ecb81";
+                    else if (d.signal.includes("SHORT")) sig.style.color = "#f6465d";
+                    else sig.style.color = "white";
 
-                if (d.active_position) {
-                    document.getElementById('active_pos').innerHTML = `POSITION: ${d.active_position.side} \( {d.active_position.amount} ETH<br>PnL: <b style="color:var(--green)"> \){d.active_position.current_pnl}</b>`;
-                } else {
-                    document.getElementById('active_pos').innerHTML = "";
+                    const logs = document.getElementById('logs');
+                    logs.innerHTML = d.logs.map(l => `<div>${l}</div>`).join("");
+
+                    if (d.active_position) {
+                        document.getElementById('active_pos').innerHTML = `POSITION: ${d.active_position.side} | ${d.active_position.amount} ETH<br>PnL: <b style="color:var(--green)">${d.active_position.current_pnl}</b>`;
+                    } else {
+                        document.getElementById('active_pos').innerHTML = "";
+                    }
+                } catch(e) {
+                    console.log("Waiting for backend...");
                 }
             }
             setInterval(update, 2000);
