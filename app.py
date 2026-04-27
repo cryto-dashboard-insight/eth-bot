@@ -1,77 +1,181 @@
-import os, ccxt, threading, time, pandas as pd
+import os
+import ccxt
+import threading
+import time
+import pandas as pd
+from datetime import datetime
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 
 app = FastAPI()
 
 state = {
-    "status": "OFFLINE", "price": 0.00, "rsi": 0.0, "ema_200": 0.0,
-    "signal": "INITIALIZING", "trend": "WAITING", "is_paused": True, "active_position": None,
-    "logs": ["v68.1 - FINAL BITGET FIX APPLIED."],
+    "status": "OFFLINE", 
+    "price": 0.00, 
+    "rsi": 0.0, 
+    "ema_200": 0.0,
+    "signal": "INITIALIZING", 
+    "trend": "WAITING", 
+    "is_paused": True, 
+    "active_position": None,
+    "logs": ["v68.3 - FULL ADVANCED: SL/TP + 15m TREND FILTER + RISK MGMT"],
     "history": [] 
 }
 
 SYMBOL = "ETH/USDT"
-exchange = None 
+RISK_PERCENT = 0.01          # 1% of USDT balance per trade
+MAX_DAILY_LOSS_PCT = 0.05    # 5% daily loss limit
+STOP_LOSS_PCT = 0.08         # 8% stop loss
+TAKE_PROFIT_PCT = 0.16       # 16% take profit (2:1 R:R)
+
+exchange = None
+daily_pnl = 0.0
+daily_reset_time = datetime.now()
 
 def add_log(msg):
-    state["logs"].insert(0, f"[{time.strftime('%H:%M:%S')}] {msg}")
-    state["logs"] = state["logs"][:40] 
+    timestamp = time.strftime('%H:%M:%S')
+    state["logs"].insert(0, f"[{timestamp}] {msg}")
+    state["logs"] = state["logs"][:60]
 
-def execute_trade(side, amount_usd=10):
-    global exchange
-    if not exchange: return
+def get_usdt_balance():
     try:
-        exchange.load_markets()
+        if not exchange: return 0.0
+        balance = exchange.fetch_balance()
+        usdt = (balance.get('total', {}).get('USDT') or 
+                balance.get('USDT', {}).get('free') or 0)
+        return float(usdt)
+    except:
+        return 0.0
+
+def execute_trade(side):
+    global exchange, daily_pnl
+    if not exchange or state["is_paused"]: return
+
+    try:
         price = state.get("price", 0)
-        
-        if side == 'buy':
-            # FIX: Explicitly passing price as 'None' and using params to satisfy Bitget
-            exchange.create_order(SYMBOL, 'market', 'buy', amount_usd, None)
-            
-            bought_amt = amount_usd / price
-            state["active_position"] = {"entry": price, "amount": f"{bought_amt:.4f}", "time": time.strftime('%H:%M:%S')}
-            state["history"].insert(0, {"time": time.strftime('%H:%M:%S'), "action": "BUY", "price": f"${price}", "pnl": "-"})
-            add_log(f"SUCCESS: Market Buy for ${amount_usd} USDT executed.")
-            
+        if price <= 0: return
+
+        if side == 'buy' and not state["active_position"]:
+            usdt_balance = get_usdt_balance()
+            if usdt_balance < 10:
+                add_log("Insufficient USDT for trade")
+                return
+
+            risk_amount = usdt_balance * RISK_PERCENT
+            cost = risk_amount * 8  # \~8x risk for reasonable position size (adjust if needed)
+
+            # Bitget-friendly market buy with cost
+            order = exchange.create_market_buy_order_with_cost(SYMBOL, cost)
+
+            filled_cost = float(order.get('cost', cost))
+            filled_amount = float(order.get('filled', filled_cost / price))
+
+            state["active_position"] = {
+                "entry": price,
+                "amount": round(filled_amount, 6),
+                "time": time.strftime('%H:%M:%S'),
+                "usdt_invested": round(filled_cost, 2),
+                "sl_price": round(price * (1 - STOP_LOSS_PCT), 2),
+                "tp_price": round(price * (1 + TAKE_PROFIT_PCT), 2)
+            }
+            add_log(f"BUY EXECUTED: \~${filled_cost:.2f} USDT | SL: ${state['active_position']['sl_price']} | TP: ${state['active_position']['tp_price']}")
+
         elif side == 'sell' and state["active_position"]:
-            amt_to_sell = state["active_position"]["amount"]
-            entry_price = state["active_position"]["entry"]
-            exchange.create_order(SYMBOL, 'market', 'sell', amt_to_sell)
-            
-            pnl_usd = (price - entry_price) * float(amt_to_sell)
-            pnl_str = f"${pnl_usd:.2f} ({((price - entry_price) / entry_price) * 100:.2f}%)"
-            state["history"].insert(0, {"time": time.strftime('%H:%M:%S'), "action": "SELL", "price": f"${price}", "pnl": pnl_str})
+            pos = state["active_position"]
+            amt = exchange.amount_to_precision(SYMBOL, pos["amount"])
+
+            order = exchange.create_market_sell_order(SYMBOL, amt)
+
+            current_price = state["price"]
+            pnl_usd = (current_price - pos["entry"]) * float(pos["amount"])
+            pnl_pct = ((current_price - pos["entry"]) / pos["entry"]) * 100
+            pnl_str = f"${pnl_usd:.2f} ({pnl_pct:.2f}%)"
+            daily_pnl += pnl_usd
+
+            state["history"].insert(0, {
+                "time": time.strftime('%H:%M:%S'),
+                "action": "SELL",
+                "price": f"${current_price:.2f}",
+                "pnl": pnl_str
+            })
+
+            add_log(f"SELL EXECUTED | PnL: {pnl_str} | Reason: Signal/SL/TP")
             state["active_position"] = None
-            add_log(f"SUCCESS: Sold {amt_to_sell} ETH. PnL: {pnl_str}")
-            
+
     except Exception as e:
-        add_log(f"TRADE ERROR: {str(e)}")
+        add_log(f"TRADE ERROR ({side}): {str(e)}")
+
+def check_sl_tp():
+    """Monitor active position for stop-loss or take-profit"""
+    if not state.get("active_position"): return
+    pos = state["active_position"]
+    price = state["price"]
+
+    if price <= pos["sl_price"]:
+        add_log(f"STOP-LOSS HIT at ${price}")
+        execute_trade('sell')
+    elif price >= pos["tp_price"]:
+        add_log(f"TAKE-PROFIT HIT at ${price}")
+        execute_trade('sell')
 
 def bot_loop():
-    fetcher = ccxt.bitget()
+    global daily_pnl, daily_reset_time
+    fetcher = ccxt.bitget({'enableRateLimit': True})
+
     while True:
         try:
-            bars = fetcher.fetch_ohlcv(SYMBOL, timeframe='1m', limit=210)
-            df = pd.DataFrame(bars, columns=['ts', 'o', 'h', 'l', 'c', 'v'])
-            df['ema_200'] = df['c'].ewm(span=200, adjust=False).mean()
-            delta = df['c'].diff(); gain = (delta.where(delta > 0, 0)).rolling(14).mean(); loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-            df['rsi'] = 100 - (100 / (1 + (gain / loss)))
-            last = df.iloc[-1]
-            
-            state["price"], state["rsi"], state["ema_200"] = round(last['c'], 2), round(last['rsi'], 1), round(last['ema_200'], 2)
+            now = datetime.now()
+            if now.date() > daily_reset_time.date():
+                daily_pnl = 0.0
+                daily_reset_time = now
+                add_log("Daily PnL reset")
+
+            if daily_pnl < -(get_usdt_balance() * MAX_DAILY_LOSS_PCT) and not state["is_paused"]:
+                state["is_paused"] = True
+                state["status"] = "PAUSED - DAILY LOSS LIMIT"
+                add_log("EMERGENCY PAUSE: Daily loss limit reached")
+
+            # Fetch 1m data for RSI + fast EMA
+            bars_1m = fetcher.fetch_ohlcv(SYMBOL, timeframe='1m', limit=210)
+            df_1m = pd.DataFrame(bars_1m, columns=['ts', 'o', 'h', 'l', 'c', 'v'])
+            df_1m['ema_200'] = df_1m['c'].ewm(span=200, adjust=False).mean()
+            delta = df_1m['c'].diff()
+            gain = delta.where(delta > 0, 0).rolling(14).mean()
+            loss = -delta.where(delta < 0, 0).rolling(14).mean()
+            df_1m['rsi'] = 100 - (100 / (1 + gain / loss))
+
+            last_1m = df_1m.iloc[-1]
+            state["price"] = round(float(last_1m['c']), 2)
+            state["rsi"] = round(float(last_1m['rsi']), 1)
+            state["ema_200"] = round(float(last_1m['ema_200']), 2)
+
+            # Higher timeframe (15m) for trend confirmation
+            bars_15m = fetcher.fetch_ohlcv(SYMBOL, timeframe='15m', limit=100)
+            df_15m = pd.DataFrame(bars_15m, columns=['ts', 'o', 'h', 'l', 'c', 'v'])
+            df_15m['ema_200'] = df_15m['c'].ewm(span=200, adjust=False).mean()
+            trend_15m = "BULLISH" if df_15m.iloc[-1]['c'] > df_15m.iloc[-1]['ema_200'] else "BEARISH"
+
             state["trend"] = "BULLISH" if state["price"] > state["ema_200"] else "BEARISH"
 
             if not state["is_paused"]:
-                if state["rsi"] < 30 and not state["active_position"]:
-                    state["signal"] = "BUY SIGNAL"
+                check_sl_tp()  # Check SL/TP first
+
+                if (state["rsi"] < 35 and 
+                    state["price"] > state["ema_200"] and 
+                    trend_15m == "BULLISH" and 
+                    not state["active_position"]):
+                    state["signal"] = "BUY SIGNAL (1m + 15m Trend Confirmed)"
                     execute_trade('buy')
-                elif state["rsi"] > 70 and state["active_position"]:
-                    state["signal"] = "SELL SIGNAL"
+                
+                elif (state["rsi"] > 70 and state["active_position"]):
+                    state["signal"] = "SELL SIGNAL (Overbought)"
                     execute_trade('sell')
-                else: 
+                else:
                     state["signal"] = "HOLDING" if state["active_position"] else "MONITORING"
-        except: pass
+
+        except Exception as e:
+            add_log(f"Bot loop error: {str(e)}")
+        
         time.sleep(5)
 
 threading.Thread(target=bot_loop, daemon=True).start()
@@ -89,29 +193,31 @@ async def start_engine(request: Request):
     global exchange
     data = await request.json()
     try:
-        # THE CRITICAL BITGET FIX IS HERE: 'createMarketBuyOrderRequiresPrice': False
         exchange = ccxt.bitget({
             'apiKey': data.get("key"), 
             'secret': data.get("secret"), 
             'password': data.get("pass"), 
             'enableRateLimit': True,
-            'options': {'createMarketBuyOrderRequiresPrice': False} 
+            'options': {'createMarketBuyOrderRequiresPrice': False}
         })
         exchange.check_required_credentials()
-        state["is_paused"], state["status"] = False, "LIVE - ENGINE RUNNING"
-        add_log("SUCCESS: Credentials accepted. Engine LIVE.")
-    except Exception as e: add_log(f"KEY ERROR: {str(e)}")
+        state["is_paused"] = False
+        state["status"] = "LIVE - ADVANCED ENGINE RUNNING"
+        add_log("SUCCESS: Credentials accepted. SL/TP + Trend Filter ACTIVE.")
+    except Exception as e:
+        add_log(f"KEY ERROR: {str(e)}")
 
 @app.post("/api/stop")
 def stop_engine():
-    state["is_paused"], state["status"] = True, "OFFLINE"
-    add_log("HALT: Trading paused.")
+    state["is_paused"] = True
+    state["status"] = "OFFLINE"
+    add_log("HALT: Trading paused by user.")
 
 @app.get("/", response_class=HTMLResponse)
 def home():
-    # Dashboard HTML remains the same as previous version
+    # Original dashboard HTML (unchanged - only title updated for version)
     return """
-    <!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Alpha v68.1</title>
+    <!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Alpha v68.3</title>
     <style>
         :root { --bg: #0b0e11; --card: #1e2329; --border: #363c4e; --text: #eaecef; --green: #0ecb81; --red: #f6465d; --yellow: #fcd535; }
         body { background: var(--bg); color: var(--text); font-family: 'Inter', sans-serif; margin: 0; padding: 10px; }
@@ -137,7 +243,7 @@ def home():
         <div class="container">
             <div>
                 <div class="card" style="margin-bottom:15px;">
-                    <div class="header"><span style="font-weight:bold; font-size:18px;">ALPHA v68.1</span></div>
+                    <div class="header"><span style="font-weight:bold; font-size:18px;">ALPHA v68.3</span></div>
                     <div style="margin-bottom:20px; font-size:13px;"><div style="display:flex; justify-content:space-between;"><span>Status:</span><b id="status">OFFLINE</b></div></div>
                     <input type="text" id="k" placeholder="API Key"><input type="password" id="s" placeholder="API Secret"><input type="password" id="p" placeholder="Passphrase">
                     <button class="btn-start" onclick="action('/api/start')">INITIALIZE LIVE TRADING</button>
@@ -158,7 +264,7 @@ def home():
         <script>
             async function action(path) {
                 const body = JSON.stringify({key:document.getElementById('k').value, secret:document.getElementById('s').value, pass:document.getElementById('p').value});
-                await fetch(path, {method:'POST', headers:{'Content-Type':'application/json'}, body});
+                await fetch(path, {method:'POST', headers:{'Content-Type':'json'}, body});
             }
             async function update() {
                 const r = await fetch('/api/status'); const d = await r.json();
@@ -176,10 +282,10 @@ def home():
                 const logs = document.getElementById('logs');
                 logs.innerHTML = d.logs.map(l => `<div>${l}</div>`).join("");
                 if(d.active_position) {
-                    document.getElementById('active_pos').innerHTML = `<div style="background:#2b3139; padding:10px; border-radius:8px;">POSITION: ${d.active_position.amount} ETH | PnL: <b style="color:var(--green)">${d.active_position.current_pnl}</b></div>`;
+                    document.getElementById('active_pos').innerHTML = `<div style="background:#2b3139; padding:10px; border-radius:8px;">POSITION: \( {d.active_position.amount} ETH | PnL: <b style="color:var(--green)"> \){d.active_position.current_pnl}</b></div>`;
                 } else { document.getElementById('active_pos').innerHTML = ""; }
                 if(d.history.length > 0) {
-                    document.getElementById('history').innerHTML = d.history.map(t => `<tr><td>${t.time}</td><td style="color:${t.action==='BUY'?'var(--green)':'var(--red)'}">${t.action}</td><td>${t.price}</td><td>${t.pnl}</td></tr>`).join("");
+                    document.getElementById('history').innerHTML = d.history.map(t => `<tr><td>\( {t.time}</td><td style="color: \){t.action==='BUY'?'var(--green)':'var(--red)'}">\( {t.action}</td><td> \){t.price}</td><td>${t.pnl}</td></tr>`).join("");
                 }
             }
             setInterval(update, 2000);
