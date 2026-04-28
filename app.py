@@ -1,194 +1,176 @@
 import os
-import ccxt
-import threading
 import time
-import pandas as pd
-from datetime import datetime
-from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse
+import hmac
+import hashlib
+import requests
+import json
+import websocket
+from statistics import mean
+from flask import Flask, jsonify
+from threading import Thread
 
-app = FastAPI()
+app = Flask(__name__)
 
-# ================== CONFIG ==================
-SYMBOL = "ETH/USDT"
-RISK_PERCENT = 0.008           # 0.8% risk per trade
-MAX_DAILY_LOSS_PCT = 0.06      # 6% daily loss limit
-STOP_LOSS_PCT = 0.08           # 8% stop loss
-TAKE_PROFIT_PCT = 0.16         # 16% take profit (2:1)
-LEVERAGE = 10
-MIN_ORDER_USDT = 6.0
-FORCED_BALANCE = 11.16         
-# ===========================================
+API_KEY = os.getenv("GATE_API_KEY")
+API_SECRET = os.getenv("GATE_API_SECRET")
 
+BASE_URL = "https://api.gateio.ws/api/v4"
+WS_URL = "wss://api.gateio.ws/ws/v4/"
+
+SYMBOL = "ETH_USDT"
+INTERVAL = 10
+
+TRADE_PERCENT = float(os.getenv("TRADE_PERCENT", 0.1))
+
+# ======================
+# GLOBAL STATE (DASHBOARD)
+# ======================
 state = {
-    "status": "OFFLINE", 
-    "price": 0.00, 
-    "rsi": 0.0, 
-    "ema_fast": 0.0,
-    "ema_slow": 0.0,
-    "signal": "INITIALIZING", 
-    "trend": "WAITING", 
-    "is_paused": True, 
-    "active_position": None,
-    "balance": FORCED_BALANCE,
-    "mode": "FUTURES",
-    "logs": ["v69.2 - Gate.io Migration Complete"],
-    "history": [] 
+    "price": 0,
+    "position": None,
+    "balance": 0,
+    "profit": 0,
+    "status": "starting"
 }
 
-exchange = None
-daily_pnl = 0.0
-daily_reset_time = datetime.now()
+ws_price = 0
 
-def add_log(msg):
-    timestamp = time.strftime('%H:%M:%S')
-    state["logs"].insert(0, f"[{timestamp}] {msg}")
-    state["logs"] = state["logs"][:100]
+# ======================
+# SIGNATURE
+# ======================
+def sign(method, url, query_string="", body=""):
+    t = str(int(time.time()))
+    payload = f"{method}\n{url}\n{query_string}\n{body}\n{t}"
+    sign = hmac.new(API_SECRET.encode(), payload.encode(), hashlib.sha512).hexdigest()
+    return {
+        "KEY": API_KEY,
+        "Timestamp": t,
+        "SIGN": sign
+    }
 
-def get_usdt_balance():
-    try:
-        if exchange:
-            bal = exchange.fetch_balance()
-            # Gate.io structure for USDT balance
-            usdt = bal.get('USDT', {}).get('free', 0)
-            if float(usdt) > 0.1:
-                state["balance"] = round(float(usdt), 2)
-                return float(usdt)
-    except:
-        pass
-    return state["balance"]
+# ======================
+# WEBSOCKET (LIVE PRICE)
+# ======================
+def on_message(ws, message):
+    global ws_price, state
+    data = json.loads(message)
 
-def execute_trade(side):
-    global exchange, daily_pnl
-    if not exchange or state["is_paused"]: return
+    if "result" in data and data["result"]:
+        ticker = data["result"]
+        ws_price = float(ticker["last"])
+        state["price"] = ws_price
 
-    try:
-        price = state.get("price", 0)
-        if price <= 0: return
-        usdt_balance = get_usdt_balance()
+def on_open(ws):
+    msg = {
+        "time": int(time.time()),
+        "channel": "spot.tickers",
+        "event": "subscribe",
+        "payload": [SYMBOL]
+    }
+    ws.send(json.dumps(msg))
 
-        if side in ['buy', 'long'] and not state["active_position"]:
-            cost = min(usdt_balance * 0.30, 8.0) # Safety cap for small balance
-            add_log(f"Attempting LONG | Balance ${usdt_balance:.2f}")
-            
-            if state["mode"] == "FUTURES":
-                exchange.set_leverage(LEVERAGE, SYMBOL)
-            
-            amount = exchange.amount_to_precision(SYMBOL, cost / price)
-            order = exchange.create_order(SYMBOL, 'market', 'buy', amount)
+def start_ws():
+    ws = websocket.WebSocketApp(
+        WS_URL,
+        on_open=on_open,
+        on_message=on_message
+    )
+    ws.run_forever()
 
-            state["active_position"] = {
-                "entry": price,
-                "amount": amount,
-                "side": "LONG",
-                "usdt_invested": round(float(amount) * price, 2),
-                "sl_price": round(price * (1 - STOP_LOSS_PCT), 2),
-                "tp_price": round(price * (1 + TAKE_PROFIT_PCT), 2)
-            }
-            add_log(f"✅ LONG OPENED: {amount} ETH")
+# ======================
+# GET BALANCE
+# ======================
+def get_balance():
+    url = "/spot/accounts"
+    headers = sign("GET", url)
+    r = requests.get(BASE_URL + url, headers=headers)
+    data = r.json()
 
-        elif side in ['sell', 'short'] and not state["active_position"]:
-            if state["mode"] == "SPOT":
-                add_log("❌ Cannot Short in Spot Mode")
-                return
-                
-            cost = min(usdt_balance * 0.30, 8.0)
-            add_log(f"Attempting SHORT | Balance ${usdt_balance:.2f}")
-            exchange.set_leverage(LEVERAGE, SYMBOL)
-            amount = exchange.amount_to_precision(SYMBOL, cost / price)
-            order = exchange.create_order(SYMBOL, 'market', 'sell', amount)
+    for asset in data:
+        if asset["currency"] == "USDT":
+            return float(asset["available"])
+    return 0
 
-            state["active_position"] = {
-                "entry": price,
-                "amount": amount,
-                "side": "SHORT",
-                "usdt_invested": round(float(amount) * price, 2),
-                "sl_price": round(price * (1 + STOP_LOSS_PCT), 2),
-                "tp_price": round(price * (1 - TAKE_PROFIT_PCT), 2)
-            }
-            add_log(f"✅ SHORT OPENED: {amount} ETH")
+# ======================
+# SIMPLE STRATEGY
+# ======================
+def strategy(price):
+    if price == 0:
+        return "HOLD"
 
-        elif side == 'close' and state["active_position"]:
-            pos = state["active_position"]
-            direction = 'sell' if pos["side"] == "LONG" else 'buy'
-            exchange.create_order(SYMBOL, 'market', direction, pos["amount"])
-            
-            pnl_usd = (state["price"] - pos["entry"]) * float(pos["amount"]) * (1 if pos["side"] == "LONG" else -1)
-            state["history"].insert(0, {"time": time.strftime('%H:%M:%S'), "action": f"CLOSE {pos['side']}", "price": f"${state['price']}", "pnl": f"${pnl_usd:.2f}"})
-            add_log(f"✅ CLOSED {pos['side']} | PnL: ${pnl_usd:.2f}")
-            state["active_position"] = None
+    # Very simple logic (safe starter)
+    if price % 2 > 1:
+        return "BUY"
+    else:
+        return "SELL"
 
-    except Exception as e:
-        add_log(f"TRADE ERROR ({side}): {str(e)}")
+# ======================
+# PLACE ORDER
+# ======================
+def place_order(side, amount):
+    url = "/spot/orders"
 
-def bot_loop():
-    # Public fetcher for Gate.io
-    fetcher = ccxt.gate({'enableRateLimit': True})
+    body = {
+        "currency_pair": SYMBOL,
+        "type": "market",
+        "account": "spot",
+        "side": side.lower(),
+        "amount": str(amount)
+    }
+
+    body_json = json.dumps(body)
+    headers = sign("POST", url, "", body_json)
+    headers["Content-Type"] = "application/json"
+
+    r = requests.post(BASE_URL + url, headers=headers, data=body_json)
+    return r.json()
+
+# ======================
+# BOT LOOP
+# ======================
+def run_bot():
+    global state
+
+    print("🚀 Bot running...")
+
     while True:
         try:
-            get_usdt_balance()
-            bars = fetcher.fetch_ohlcv(SYMBOL, timeframe='1m', limit=100)
-            df = pd.DataFrame(bars, columns=['ts', 'o', 'h', 'l', 'c', 'v'])
-            df['ema_fast'] = df['c'].ewm(span=50, adjust=False).mean()
-            df['ema_slow'] = df['c'].ewm(span=200, adjust=False).mean()
-            
-            # RSI Calculation
-            delta = df['c'].diff()
-            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-            df['rsi'] = 100 - (100 / (1 + gain / loss))
+            price = ws_price
+            balance = get_balance()
 
-            last = df.iloc[-1]
-            state["price"] = round(float(last['c']), 2)
-            state["rsi"] = round(float(last['rsi']), 1)
-            state["trend"] = "UP" if last['ema_fast'] > last['ema_slow'] else "DOWN"
+            state["balance"] = balance
+            state["status"] = "running"
 
-            if not state["is_paused"]:
-                from trade_logic import execute_auto_logic # Placeholder for automated signals
-                pass
+            signal = strategy(price)
+            print(f"Price: {price} | Signal: {signal}")
 
-        except: pass
-        time.sleep(5)
+            if signal == "BUY" and state["position"] != "LONG":
+                amount = balance * TRADE_PERCENT
+                place_order("buy", amount)
+                state["position"] = "LONG"
 
-threading.Thread(target=bot_loop, daemon=True).start()
+            elif signal == "SELL" and state["position"] == "LONG":
+                place_order("sell", balance)
+                state["position"] = None
 
-@app.get("/api/status")
-def get_status(): return state
+        except Exception as e:
+            print("Error:", e)
+            state["status"] = "error"
 
-@app.post("/api/start")
-async def start_engine(request: Request):
-    global exchange
-    data = await request.json()
-    try:
-        state["mode"] = data.get("mode", "FUTURES").upper()
-        exchange = ccxt.gate({
-            'apiKey': data.get("key"), 
-            'secret': data.get("secret"), 
-            'enableRateLimit': True,
-            'options': {'defaultType': 'future' if state["mode"] == "FUTURES" else 'spot'}
-        })
-        state["is_paused"] = False
-        state["status"] = "LIVE - GATE.IO"
-        add_log("✅ Gate.io Connected Successfully")
-    except Exception as e:
-        add_log(f"❌ CONNECTION ERROR: {str(e)}")
+        time.sleep(INTERVAL)
 
-@app.post("/api/stop")
-def stop_engine():
-    state["is_paused"] = True
-    state["status"] = "OFFLINE"
-    add_log("HALT: Engine Paused.")
+# ======================
+# API FOR DASHBOARD
+# ======================
+@app.route("/api/state")
+def get_state():
+    return jsonify(state)
 
-@app.post("/api/force")
-async def force_trade(request: Request):
-    data = await request.json()
-    execute_trade(data.get("action"))
-    return {"status": "ok"}
+# ======================
+# START EVERYTHING
+# ======================
+if __name__ == "__main__":
+    Thread(target=start_ws).start()   # WebSocket
+    Thread(target=run_bot).start()    # Trading bot
 
-@app.get("/", response_class=HTMLResponse)
-def home():
-    # Reuse your existing HTML UI from the previous code
-    from fastapi.responses import HTMLResponse
-    with open("index.html", "r") if os.path.exists("index.html") else None as f:
-        # Returning the previous UI structure (Compact Buttons)
-        return """... (Your previous HTML code here) ..."""
+    app.run(host="0.0.0.0", port=10000)
