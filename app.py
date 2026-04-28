@@ -5,8 +5,7 @@ import hashlib
 import requests
 import json
 import websocket
-from statistics import mean
-from flask import Flask, jsonify
+from flask import Flask, jsonify, render_template
 from threading import Thread
 
 app = Flask(__name__)
@@ -18,18 +17,15 @@ BASE_URL = "https://api.gateio.ws/api/v4"
 WS_URL = "wss://api.gateio.ws/ws/v4/"
 
 SYMBOL = "ETH_USDT"
-INTERVAL = 10
-
 TRADE_PERCENT = float(os.getenv("TRADE_PERCENT", 0.1))
 
 # ======================
-# GLOBAL STATE (DASHBOARD)
+# STATE (FOR DASHBOARD)
 # ======================
 state = {
     "price": 0,
     "position": None,
     "balance": 0,
-    "profit": 0,
     "status": "starting"
 }
 
@@ -49,7 +45,7 @@ def sign(method, url, query_string="", body=""):
     }
 
 # ======================
-# WEBSOCKET (LIVE PRICE)
+# WEBSOCKET PRICE
 # ======================
 def on_message(ws, message):
     global ws_price, state
@@ -92,19 +88,6 @@ def get_balance():
     return 0
 
 # ======================
-# SIMPLE STRATEGY
-# ======================
-def strategy(price):
-    if price == 0:
-        return "HOLD"
-
-    # Very simple logic (safe starter)
-    if price % 2 > 1:
-        return "BUY"
-    else:
-        return "SELL"
-
-# ======================
 # PLACE ORDER
 # ======================
 def place_order(side, amount):
@@ -122,8 +105,7 @@ def place_order(side, amount):
     headers = sign("POST", url, "", body_json)
     headers["Content-Type"] = "application/json"
 
-    r = requests.post(BASE_URL + url, headers=headers, data=body_json)
-    return r.json()
+    requests.post(BASE_URL + url, headers=headers, data=body_json)
 
 # ======================
 # BOT LOOP
@@ -141,27 +123,32 @@ def run_bot():
             state["balance"] = balance
             state["status"] = "running"
 
-            signal = strategy(price)
-            print(f"Price: {price} | Signal: {signal}")
+            # SIMPLE SAFE LOGIC
+            if price != 0:
+                if price % 2 > 1 and state["position"] != "LONG":
+                    amount = balance * TRADE_PERCENT
+                    place_order("buy", amount)
+                    state["position"] = "LONG"
 
-            if signal == "BUY" and state["position"] != "LONG":
-                amount = balance * TRADE_PERCENT
-                place_order("buy", amount)
-                state["position"] = "LONG"
+                elif price % 2 <= 1 and state["position"] == "LONG":
+                    place_order("sell", balance)
+                    state["position"] = None
 
-            elif signal == "SELL" and state["position"] == "LONG":
-                place_order("sell", balance)
-                state["position"] = None
+            print(f"Price: {price}")
 
         except Exception as e:
             print("Error:", e)
             state["status"] = "error"
 
-        time.sleep(INTERVAL)
+        time.sleep(10)
 
 # ======================
-# API FOR DASHBOARD
+# ROUTES
 # ======================
+@app.route("/")
+def home():
+    return render_template("index.html")
+
 @app.route("/api/state")
 def get_state():
     return jsonify(state)
@@ -170,7 +157,7 @@ def get_state():
 # START EVERYTHING
 # ======================
 if __name__ == "__main__":
-    Thread(target=start_ws).start()   # WebSocket
-    Thread(target=run_bot).start()    # Trading bot
+    Thread(target=start_ws).start()
+    Thread(target=run_bot).start()
 
     app.run(host="0.0.0.0", port=10000)
