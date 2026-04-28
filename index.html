@@ -1,60 +1,25 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Trading Bot</title>
-  <style>
-    body {
-      background: #0f172a;
-      color: white;
-      text-align: center;
-      font-family: Arial;
-      padding-top: 50px;
-    }
-    .box {
-      background: #1e293b;
-      margin: 10px;
-      padding: 20px;
-      border-radius: 10px;
-      display: inline-block;
-      width: 200px;
-    }
-  </style>
+    <title>Gate.io ETH Bot</title>
+    <meta http-equiv="refresh" content="10">
+    <style>
+        body { font-family: Arial; padding: 20px; background: #f4f4f4; }
+        .card { background: white; padding: 15px; margin: 10px 0; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+    </style>
 </head>
 <body>
-
-<h1>🚀 Live Trading Bot</h1>
-
-<div class="box">
-  <h3>Price</h3>
-  <p id="price">0</p>
-</div>
-
-<div class="box">
-  <h3>Balance</h3>
-  <p id="balance">0</p>
-</div>
-
-<div class="box">
-  <h3>Position</h3>
-  <p id="position">None</p>
-</div>
-
-<div class="box">
-  <h3>Status</h3>
-  <p id="status">Starting...</p>
-</div>
-
-<script>
-setInterval(async () => {
-  const res = await fetch("/api/state");
-  const data = await res.json();
-
-  document.getElementById("price").innerText = data.price;
-  document.getElementById("balance").innerText = data.balance;
-  document.getElementById("position").innerText = data.position;
-  document.getElementById("status").innerText = data.status;
-}, 2000);
-</script>
-
+    <h1>Gate.io ETH_USDT Trading Bot</h1>
+    <div class="card">
+        <h2>Status: <span id="status">{{ state.status }}</span></h2>
+        <p>Price: <strong>{{ state.price|round(2) }}</strong> USDT</p>
+        <p>USDT Balance: <strong>{{ state.usdt_balance|round(2) }}</strong></p>
+        <p>ETH Balance: <strong>{{ state.eth_balance|round(4) }}</strong></p>
+        <p>Position: <strong>{{ state.position or 'None' }}</strong></p>
+        {% if state.last_error %}
+        <p style="color:red;">Last Error: {{ state.last_error }}</p>
+        {% endif %}
+    </div>
+    <p>Page refreshes every 10 seconds.</p>
 </body>
 </html>
