@@ -1,4 +1,3 @@
-fastapi
-uvicorn
-ccxt
-pandas
+flask
+requests
+websocket-client
