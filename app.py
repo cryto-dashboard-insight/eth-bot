@@ -16,13 +16,14 @@ API_SECRET = os.getenv("GATE_API_SECRET")
 SYMBOL = "ETH_USDT"
 TRADE_PERCENT = float(os.getenv("TRADE_PERCENT", 0.05))   # 5% of balance
 
-BASE_URL = "https://api.gateio.ws/api/v4"
-WS_URL = "wss://api.gateio.ws/ws/v4/"
+# === TESTNET CONFIG ===
+BASE_URL = "https://api-testnet.gateapi.io/api/v4"   # ← Testnet URL (as requested)
+WS_URL = "wss://api.gateio.ws/ws/v4/"                # WebSocket usually stays the same
 
 # ====================== STATE ======================
 state = {
     "price": 0.0,
-    "position": None,      # "LONG" or None
+    "position": None,
     "usdt_balance": 0.0,
     "eth_balance": 0.0,
     "status": "starting",
@@ -35,7 +36,7 @@ ws_price = 0.0
 # ====================== SIGNATURE ======================
 def get_sign_headers(method: str, path: str, query_string: str = "", body: str = ""):
     if not API_KEY or not API_SECRET:
-        raise ValueError("API_KEY or API_SECRET environment variables are missing")
+        raise ValueError("GATE_API_KEY or GATE_API_SECRET is missing in environment variables")
 
     timestamp = str(int(time.time() * 1000))
     payload = f"{method}\n{path}\n{query_string}\n{body}\n{timestamp}"
@@ -66,11 +67,11 @@ def on_message(ws, message):
                 ws_price = float(ticker["last"])
                 state["price"] = ws_price
     except:
-        pass  # Silent fail for noisy WS
+        pass
 
 
 def on_open(ws):
-    print("✅ WebSocket connected")
+    print("✅ WebSocket connected to Gate.io")
     msg = {
         "time": int(time.time()),
         "channel": "spot.tickers",
@@ -90,7 +91,7 @@ def start_ws():
             )
             ws.run_forever(ping_interval=20)
         except Exception as e:
-            print("WS reconnecting...", e)
+            print("WebSocket error, reconnecting...", e)
             time.sleep(5)
 
 
@@ -102,7 +103,7 @@ def get_balances():
         r = requests.get(BASE_URL + path, headers=headers, timeout=10)
 
         if r.status_code != 200:
-            state["last_error"] = f"Balance API: {r.status_code}"
+            state["last_error"] = f"Balance API Error: {r.status_code} - {r.text[:100]}"
             return 0.0, 0.0
 
         data = r.json()
@@ -121,7 +122,7 @@ def get_balances():
         state["eth_balance"] = eth
         return usdt, eth
     except Exception as e:
-        state["last_error"] = f"Balance error: {str(e)[:100]}"
+        state["last_error"] = f"Balance exception: {str(e)[:100]}"
         return 0.0, 0.0
 
 
@@ -133,7 +134,7 @@ def place_order(side: str):
 
         if side.lower() == "buy":
             amount = usdt * TRADE_PERCENT
-            if amount < 10:   # Gate.io minimum \~10 USDT
+            if amount < 10:
                 return
             amount_str = str(round(amount, 2))
         else:  # sell
@@ -156,18 +157,20 @@ def place_order(side: str):
         headers["Content-Type"] = "application/json"
 
         r = requests.post(BASE_URL + path, headers=headers, data=body_json, timeout=10)
-        print(f"→ {side} order placed | Status: {r.status_code} | Response: {r.text[:200]}")
-
+        
+        print(f"→ {side.upper()} ORDER | Status: {r.status_code}")
         if r.status_code not in (200, 201):
-            state["last_error"] = r.text[:150]
+            state["last_error"] = f"Order failed: {r.text[:150]}"
+        else:
+            state["last_error"] = ""  # clear previous error on success
     except Exception as e:
-        state["last_error"] = f"Order error: {str(e)[:100]}"
+        state["last_error"] = f"Order exception: {str(e)[:100]}"
 
 
 # ====================== BOT LOOP ======================
 def run_bot():
     global state
-    print("🚀 Trading Bot Started on Render...")
+    print("🚀 Testnet Trading Bot Started...")
 
     while True:
         try:
@@ -179,16 +182,42 @@ def run_bot():
             state["last_update"] = time.strftime("%H:%M:%S")
 
             if price > 0:
-                # Simple demo logic (replace later with real strategy)
                 if price % 2 > 1 and state["position"] != "LONG" and usdt > 12:
+                    print("🟢 Buying condition met")
                     place_order("buy")
                     state["position"] = "LONG"
 
                 elif price % 2 <= 1 and state["position"] == "LONG" and eth > 0.001:
+                    print("🔴 Selling condition met")
                     place_order("sell")
                     state["position"] = None
 
-            print(f"Price: {price:.2f} | USDT: {usdt:.2f} | ETH: {eth:.4f} | Pos: {state['position']}")
+            print(f"Price: {price:.2f} | USDT: {usdt:.2f} | ETH: {eth:.4f} | Position: {state['position']}")
 
         except Exception as e:
-            state["
+            state["status"] = "error"
+            state["last_error"] = str(e)[:120]
+            print("Bot loop error:", e)
+
+        time.sleep(10)
+
+
+# ====================== ROUTES ======================
+@app.route("/")
+def home():
+    return render_template("index.html", state=state)
+
+
+@app.route("/api/state")
+def get_state():
+    return jsonify(state)
+
+
+# ====================== START ======================
+if __name__ == "__main__":
+    Thread(target=start_ws, daemon=True).start()
+    Thread(target=run_bot, daemon=True).start()
+
+    port = int(os.environ.get("PORT", 10000))
+    print(f"✅ Flask app starting on port {port}")
+    app.run(host="0.0.0.0", port=port, debug=False)
