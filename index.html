@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Trading Bot</title>
+  <style>
+    body {
+      background: #0f172a;
+      color: white;
+      text-align: center;
+      font-family: Arial;
+      padding-top: 50px;
+    }
+    .box {
+      background: #1e293b;
+      margin: 10px;
+      padding: 20px;
+      border-radius: 10px;
+      display: inline-block;
+      width: 200px;
+    }
+  </style>
+</head>
+<body>
+
+<h1>🚀 Live Trading Bot</h1>
+
+<div class="box">
+  <h3>Price</h3>
+  <p id="price">0</p>
+</div>
+
+<div class="box">
+  <h3>Balance</h3>
+  <p id="balance">0</p>
+</div>
+
+<div class="box">
+  <h3>Position</h3>
+  <p id="position">None</p>
+</div>
+
+<div class="box">
+  <h3>Status</h3>
+  <p id="status">Starting...</p>
+</div>
+
+<script>
+setInterval(async () => {
+  const res = await fetch("/api/state");
+  const data = await res.json();
+
+  document.getElementById("price").innerText = data.price;
+  document.getElementById("balance").innerText = data.balance;
+  document.getElementById("position").innerText = data.position;
+  document.getElementById("status").innerText = data.status;
+}, 2000);
+</script>
+
+</body>
+</html>
